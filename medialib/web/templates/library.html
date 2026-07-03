@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}Library{% endblock %}
+{% block content %}
+<div class="mb-6">
+  <div class="flex items-end justify-between gap-4">
+    <div>
+      <h1 class="text-3xl font-bold tracking-tight">Library</h1>
+      <p class="text-slate-500 mt-1 text-sm">
+        {{ total_artists }} artists &middot; {{ total_tracks }} tracks
+        {% if letter %}<span class="text-slate-400">&middot; {{ letter }}</span>{% endif %}
+        {% if q %}<span class="text-slate-400">&middot; “{{ q }}”</span>{% endif %}
+      </p>
+    </div>
+    <form method="get" class="flex gap-2 w-72">
+      <input name="q" value="{{ q }}" placeholder="Search artist or track…"
+        class="flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-ink-900/10 focus:border-slate-300">
+      <button class="bg-ink-900 text-white px-4 py-2 rounded-lg text-sm hover:bg-ink-800 transition-colors">Go</button>
+    </form>
+  </div>
+
+  {% if not q %}
+  <div class="flex flex-wrap gap-1 mt-5 scroll-thin">
+    {% for l in letters %}
+    <a href="/library?letter={{ l }}" class="px-2.5 py-1 rounded-md text-xs font-medium transition-colors
+      {{ 'bg-ink-900 text-white' if letter == l else 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100' }}">{{ l }}</a>
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+
+{% if artists %}
+<div class="space-y-1">
+  {% for a in artists %}
+  <details class="group bg-white border border-slate-200 rounded-xl overflow-hidden">
+    <summary class="flex items-center gap-3 px-4 py-3 hover:bg-slate-50 transition-colors">
+      <svg class="chev w-4 h-4 text-slate-400 shrink-0" viewBox="0 0 20 20" fill="currentColor"><path d="M7 5l6 5-6 5V5z"/></svg>
+      <div class="flex-1 min-w-0">
+        <a href="/library/artist/{{ a.id }}" class="font-semibold text-[15px] hover:text-blue-600 hover:underline" onclick="event.stopPropagation()">{{ a.name }}</a>
+        {% if a.genres %}<span class="text-xs text-slate-400 ml-2">{{ a.genres }}</span>{% endif %}
+      </div>
+      <div class="flex items-center gap-3 text-xs text-slate-400 shrink-0">
+        <span>{{ a.n_albums }} album{{ 's' if a.n_albums != 1 }}</span>
+        <span class="text-slate-300">·</span>
+        <span>{{ a.n_tracks }}</span>
+      </div>
+    </summary>
+    <div class="border-t border-slate-100 divide-y divide-slate-100">
+      {% for album_name, album_data in a.albums.items() %}
+      <div class="px-4 py-3">
+        <div class="flex items-center gap-2 mb-2">
+          {% if album_data.album_id %}<a href="/library/album/{{ album_data.album_id }}" class="text-xs font-semibold uppercase tracking-wider text-slate-400 hover:text-blue-600">{{ album_name }}</a>{% else %}<span class="text-xs font-semibold uppercase tracking-wider text-slate-400">{{ album_name }}</span>{% endif %}
+        </div>
+        <div class="space-y-1">
+          {% for row in album_data["tracks"] %}
+          <div class="flex items-center gap-3 py-1">
+            <div class="flex-1 text-sm text-slate-700 truncate">
+              <a href="/library/track/{{ row.track.id }}" class="hover:text-blue-600 hover:underline">{{ row.track.title }}</a>
+              {% if row.role == 'featured' %}<span class="text-xs text-amber-600 ml-1">feat.</span>{% endif %}
+            </div>
+            {% if row.track.duration_ms %}
+            <div class="text-xs text-slate-400 tabular-nums">{{ (row.track.duration_ms // 1000) // 60 }}:{{ '%02d' % ((row.track.duration_ms // 1000) % 60) }}</div>
+            {% endif %}
+            <div class="flex gap-1 w-24 justify-end">
+              {% for s in row.sources %}
+              <span title="{{ s }}" class="text-[10px] px-1.5 py-0.5 rounded font-medium
+                {{ 'bg-emerald-100 text-emerald-700' if s == 'spotify' else 'bg-red-100 text-red-700' if s == 'ytmusic' else 'bg-amber-100 text-amber-700' }}">{{ s[:2] }}</span>
+              {% endfor %}
+            </div>
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </details>
+  {% endfor %}
+</div>
+{% else %}
+<div class="bg-white border border-slate-200 rounded-xl px-6 py-16 text-center">
+  <p class="text-slate-500 text-sm">No tracks found. {% if q %}Try a different search.{% else %}Pick a letter or import from a source.{% endif %}</p>
+  <a href="/" class="inline-block mt-4 text-sm text-ink-900 hover:underline">← back home</a>
+</div>
+{% endif %}
+{% endblock %}

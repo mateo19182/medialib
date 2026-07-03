@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}Migration preview{% endblock %}
+{% block content %}
+<div class="mb-6">
+  <h1 class="text-3xl font-bold tracking-tight">Preview</h1>
+  <p class="text-slate-500 mt-1 text-sm">{{ preview|length }} tracks checked against YouTube Music.</p>
+</div>
+
+<div class="bg-white border border-slate-200 rounded-xl divide-y divide-slate-100 overflow-hidden">
+  {% for p in preview %}
+  <div class="px-5 py-3 flex items-start gap-3">
+    <div class="flex-1 min-w-0">
+      <div class="font-medium text-[15px] truncate">{{ p.track.title }}</div>
+      <div class="text-xs text-slate-500 truncate">{{ p.track.artist.name }}</div>
+    </div>
+    <div class="text-right text-sm shrink-0">
+      {% if p.error %}
+      <div class="text-red-600 text-xs">error: {{ p.error }}</div>
+      {% elif p.best %}
+      <div class="text-emerald-700 truncate max-w-xs">{{ p.best.title }}</div>
+      <div class="text-xs text-slate-400">{{ p.best.artist }} · {{ p.best.video_id }}</div>
+      {% else %}
+      <div class="text-amber-600 text-xs">no match</div>
+      {% endif %}
+    </div>
+  </div>
+  {% else %}
+  <div class="px-5 py-12 text-center text-sm text-slate-500">Nothing to preview.</div>
+  {% endfor %}
+</div>
+<a href="/migrate" class="inline-block mt-5 text-sm text-slate-500 hover:text-slate-700">← back</a>
+{% endblock %}

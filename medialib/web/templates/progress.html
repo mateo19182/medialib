@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Progress{% endblock %}
+{% block content %}
+{% if job is none %}
+<div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg">Job not found.</div>
+<a href="/" class="inline-block mt-4 text-sm text-slate-500 hover:underline">← home</a>
+{% else %}
+{% include "progress_fragment.html" %}
+{% endif %}
+{% endblock %}

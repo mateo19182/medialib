@@ -1,0 +1,18 @@
+# secrets / local state
+.env
+data/
+*.db
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# editor
+.vscode/
+.idea/
+.DS_Store

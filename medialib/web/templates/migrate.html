@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Migrate{% endblock %}
+{% block content %}
+<div class="mb-8">
+  <h1 class="text-3xl font-bold tracking-tight">Migrate to YouTube Music</h1>
+  <p class="text-slate-500 mt-1 text-sm">Search and add your library tracks to a new YouTube Music playlist.</p>
+</div>
+
+{% if not status.ytmusic %}
+<div class="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-3 rounded-lg mb-6 text-sm">
+  YouTube Music not connected. Run <code class="text-xs bg-amber-100 px-1.5 py-0.5 rounded">uv run ytmusicapi setup oauth</code> then restart.
+</div>
+{% endif %}
+
+<div class="grid md:grid-cols-2 gap-4">
+  <div class="bg-white border border-slate-200 rounded-xl p-6 space-y-4">
+    <div>
+      <h2 class="font-semibold mb-1">Dry-run preview</h2>
+      <p class="text-xs text-slate-500 mb-3">See what YouTube Music matches for each track before committing.</p>
+    </div>
+    <form method="post" action="/migrate/preview" class="space-y-3">
+      <div>
+        <label class="block text-sm font-medium mb-1.5">Source</label>
+        <select name="playlist_id" class="border border-slate-200 rounded-lg px-3 py-2 w-full text-sm focus:outline-none focus:ring-2 focus:ring-ink-900/10">
+          <option value="">All tracks in library</option>
+          {% for pl in playlists %}
+          <option value="{{ pl.id }}">{{ pl.name }} ({{ pl.source.value }})</option>
+          {% endfor %}
+        </select>
+      </div>
+      <button class="w-full bg-ink-900 hover:bg-ink-800 text-white px-4 py-2 rounded-lg text-sm transition-colors {{ 'opacity-40 cursor-not-allowed' if not status.ytmusic }}" {{ '' if status.ytmusic else 'disabled' }}>
+        Preview matches
+      </button>
+    </form>
+  </div>
+
+  <div class="bg-white border border-slate-200 rounded-xl p-6 space-y-4">
+    <div>
+      <h2 class="font-semibold mb-1">Migrate</h2>
+      <p class="text-xs text-slate-500 mb-3">Create a YouTube Music playlist and add matched tracks. Runs in the background.</p>
+    </div>
+    <form method="post" action="/migrate/run" class="space-y-3">
+      <div>
+        <label class="block text-sm font-medium mb-1.5">Source</label>
+        <input name="playlist_id" type="text" placeholder="playlist id or empty for all" class="border border-slate-200 rounded-lg px-3 py-2 w-full text-sm focus:outline-none focus:ring-2 focus:ring-ink-900/10">
+      </div>
+      <div>
+        <label class="block text-sm font-medium mb-1.5">New playlist name</label>
+        <input name="target_name" required placeholder="My migrated library" class="border border-slate-200 rounded-lg px-3 py-2 w-full text-sm focus:outline-none focus:ring-2 focus:ring-ink-900/10">
+      </div>
+      <button class="w-full bg-red-600 hover:bg-red-500 text-white px-4 py-2 rounded-lg text-sm transition-colors {{ 'opacity-40 cursor-not-allowed' if not status.ytmusic }}" {{ '' if status.ytmusic else 'disabled' }}>
+        Create & migrate
+      </button>
+    </form>
+  </div>
+</div>
+{% endblock %}
