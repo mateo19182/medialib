@@ -104,7 +104,8 @@ export const SCHEMA: string[] = [
      source_id TEXT,                 -- canonical id within the source
      entity_type TEXT,               -- artist | album | track | book
      entity_id INTEGER,              -- fk into the matching entity table
-     status TEXT NOT NULL DEFAULT 'pending', -- pending | enriched | error
+     title TEXT,                     -- denormalized display label
+     status TEXT NOT NULL DEFAULT 'pending', -- pending | ok | error
      raw_json TEXT,
      saved_at TEXT NOT NULL DEFAULT (datetime('now')),
      saved_via TEXT NOT NULL DEFAULT 'web',  -- web | telegram

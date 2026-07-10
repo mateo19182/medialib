@@ -1,11 +1,32 @@
 import { DurableObject } from "cloudflare:workers";
 import type { Env, LibraryStats } from "../types";
 import { SCHEMA } from "../db/schema";
+import { classify, fetchMetadata } from "../ingest";
+import type { Fetched } from "../ingest";
+import { normalize, splitArtists } from "../util";
+
+export interface SaveResult {
+  ok: boolean;
+  duplicate?: boolean;
+  linkId?: number;
+  status?: string;
+  entityType?: string | null;
+  title?: string;
+  error?: string;
+}
+
+export interface ArtistSummary {
+  id: number;
+  name: string;
+  image_url: string | null;
+  albums: number;
+  tracks: number;
+}
 
 /**
  * The one Durable Object that owns the entire library: SQLite catalog + the
- * background job loop (alarms, added in later milestones). Single-user, so a
- * single instance addressed by a fixed name (see getLibrary()).
+ * ingestion pipeline. Single-user, so a single instance addressed by a fixed
+ * name (see getLibrary()).
  */
 export class Library extends DurableObject<Env> {
   private sql: SqlStorage;
@@ -13,20 +34,34 @@ export class Library extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.sql = ctx.storage.sql;
-    // Schema setup is the one legitimate use of blockConcurrencyWhile: it runs
-    // once on cold start before any request is served, guaranteeing the tables
-    // exist. No external I/O happens inside.
     ctx.blockConcurrencyWhile(async () => {
       for (const stmt of SCHEMA) this.sql.exec(stmt);
+      this.ensureColumns();
     });
   }
 
-  /** Cheap liveness check. */
+  /**
+   * Additive migrations: add columns introduced after a table was first
+   * created, so evolving SCHEMA doesn't require wiping existing DOs.
+   */
+  private ensureColumns(): void {
+    const wanted: Record<string, Record<string, string>> = {
+      links: { title: "TEXT" },
+    };
+    for (const [table, cols] of Object.entries(wanted)) {
+      const have = new Set(
+        (this.sql.exec(`PRAGMA table_info(${table})`).toArray() as { name: string }[]).map((r) => r.name),
+      );
+      for (const [col, type] of Object.entries(cols)) {
+        if (!have.has(col)) this.sql.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
+      }
+    }
+  }
+
   ping(): string {
     return "pong";
   }
 
-  /** Top-level counts for the dashboard. */
   stats(): LibraryStats {
     const count = (table: string): number =>
       Number(this.sql.exec(`SELECT COUNT(*) AS n FROM ${table}`).one().n);
@@ -39,13 +74,235 @@ export class Library extends DurableObject<Env> {
     };
   }
 
-  /** Most recently saved links (for the dashboard / bot /recent). */
   recent(limit = 20): Record<string, unknown>[] {
     return this.sql
       .exec(
-        "SELECT id, url, source, source_kind, status, saved_at, saved_via FROM links ORDER BY saved_at DESC, id DESC LIMIT ?",
+        "SELECT id, url, source, source_kind, entity_type, title, status, saved_at, saved_via FROM links ORDER BY saved_at DESC, id DESC LIMIT ?",
         limit,
       )
       .toArray() as Record<string, unknown>[];
+  }
+
+  /** Artists that have at least one album or track, with counts, for /library. */
+  listArtists(): ArtistSummary[] {
+    return this.sql
+      .exec(
+        `SELECT a.id, a.name, a.image_url,
+                (SELECT COUNT(*) FROM albums al WHERE al.artist_id = a.id) AS albums,
+                (SELECT COUNT(*) FROM tracks t WHERE t.artist_id = a.id) AS tracks
+         FROM artists a
+         WHERE albums > 0 OR tracks > 0
+         ORDER BY a.name COLLATE NOCASE`,
+      )
+      .toArray() as unknown as ArtistSummary[];
+  }
+
+  /** Artist page: the artist plus their albums and tracks. */
+  artistDetail(id: number): {
+    artist: { id: number; name: string; image_url: string | null; genres: string | null };
+    albums: Record<string, unknown>[];
+    tracks: Record<string, unknown>[];
+  } | null {
+    const artist = this.sql.exec("SELECT id, name, image_url, genres FROM artists WHERE id = ?", id).toArray()[0] as
+      | { id: number; name: string; image_url: string | null; genres: string | null }
+      | undefined;
+    if (!artist) return null;
+    const albums = this.sql
+      .exec("SELECT id, title, year, cover_url FROM albums WHERE artist_id = ? ORDER BY year, title COLLATE NOCASE", id)
+      .toArray() as Record<string, unknown>[];
+    const tracks = this.sql
+      .exec(
+        `SELECT t.id, t.title, t.duration_ms, al.title AS album
+         FROM tracks t LEFT JOIN albums al ON al.id = t.album_id
+         WHERE t.artist_id = ? ORDER BY t.title COLLATE NOCASE`,
+        id,
+      )
+      .toArray() as Record<string, unknown>[];
+    return { artist, albums, tracks };
+  }
+
+  // --- ingestion -----------------------------------------------------------
+
+  /** Save a link: classify -> dedupe -> fetch metadata -> upsert -> record. */
+  async saveLink(url: string, via: "web" | "telegram" = "web"): Promise<SaveResult> {
+    const c = classify(url);
+    if (!c) return { ok: false, error: "Unrecognized link" };
+
+    const existing = this.sql
+      .exec("SELECT id, title, status, entity_type FROM links WHERE source = ? AND source_id = ?", c.source, c.sourceId)
+      .toArray()[0] as { id: number; title: string | null; status: string; entity_type: string | null } | undefined;
+    if (existing) {
+      return {
+        ok: true,
+        duplicate: true,
+        linkId: existing.id,
+        status: existing.status,
+        entityType: existing.entity_type,
+        title: existing.title ?? url,
+      };
+    }
+
+    let fetched: Fetched | null = null;
+    let error: string | undefined;
+    try {
+      fetched = await fetchMetadata(c, this.env);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    }
+
+    let entityType: string | null = null;
+    let entityId: number | null = null;
+    let title = url;
+    if (fetched) {
+      const up = this.upsertEntity(fetched);
+      entityType = up.entityType;
+      entityId = up.entityId;
+      title = up.title;
+    }
+    const status = fetched ? "ok" : error ? "error" : "pending";
+
+    let linkId: number;
+    try {
+      linkId = Number(
+        this.sql
+          .exec(
+            `INSERT INTO links (url, source, source_kind, source_id, entity_type, entity_id, title, status, raw_json, saved_via)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+            url,
+            c.source,
+            c.kind,
+            c.sourceId,
+            entityType,
+            entityId,
+            title,
+            status,
+            JSON.stringify(fetched ?? (error ? { error } : {})),
+            via,
+          )
+          .one().id,
+      );
+    } catch {
+      // Lost a race on the UNIQUE(source, source_id) constraint — treat as dup.
+      const dup = this.sql
+        .exec("SELECT id, title, status FROM links WHERE source = ? AND source_id = ?", c.source, c.sourceId)
+        .toArray()[0] as { id: number; title: string | null; status: string } | undefined;
+      return { ok: true, duplicate: true, linkId: dup?.id, status: dup?.status, title: dup?.title ?? url };
+    }
+
+    return { ok: true, linkId, status, entityType, title, error };
+  }
+
+  private upsertEntity(f: Fetched): { entityType: string; entityId: number; title: string } {
+    switch (f.entityType) {
+      case "artist": {
+        const id = this.getOrCreateArtist(f.name, f.imageUrl);
+        return { entityType: "artist", entityId: id, title: f.name };
+      }
+      case "album": {
+        const artistId = this.getOrCreateArtist(f.artist);
+        const id = this.getOrCreateAlbum(f.title, artistId, { year: f.year, coverUrl: f.coverUrl });
+        return { entityType: "album", entityId: id, title: f.title };
+      }
+      case "track": {
+        const id = this.upsertTrack(f);
+        return { entityType: "track", entityId: id, title: f.title };
+      }
+      case "book":
+        // Books arrive with Goodreads in M3.
+        throw new Error("book ingestion not implemented yet");
+    }
+  }
+
+  private getOrCreateArtist(name: string, imageUrl?: string): number {
+    const norm = normalize(name);
+    const row = this.sql.exec("SELECT id FROM artists WHERE normalized_name = ?", norm).toArray()[0] as
+      | { id: number }
+      | undefined;
+    if (row) {
+      if (imageUrl) this.sql.exec("UPDATE artists SET image_url = COALESCE(image_url, ?) WHERE id = ?", imageUrl, row.id);
+      return row.id;
+    }
+    return Number(
+      this.sql
+        .exec("INSERT INTO artists (name, normalized_name, image_url) VALUES (?, ?, ?) RETURNING id", name, norm, imageUrl ?? null)
+        .one().id,
+    );
+  }
+
+  private getOrCreateAlbum(title: string, artistId: number, extra: { year?: number; coverUrl?: string } = {}): number {
+    const norm = normalize(title);
+    const row = this.sql
+      .exec("SELECT id FROM albums WHERE normalized_title = ? AND artist_id = ?", norm, artistId)
+      .toArray()[0] as { id: number } | undefined;
+    if (row) {
+      this.sql.exec(
+        "UPDATE albums SET year = COALESCE(year, ?), cover_url = COALESCE(cover_url, ?) WHERE id = ?",
+        extra.year ?? null,
+        extra.coverUrl ?? null,
+        row.id,
+      );
+      return row.id;
+    }
+    return Number(
+      this.sql
+        .exec(
+          "INSERT INTO albums (title, normalized_title, artist_id, year, cover_url) VALUES (?, ?, ?, ?, ?) RETURNING id",
+          title,
+          norm,
+          artistId,
+          extra.year ?? null,
+          extra.coverUrl ?? null,
+        )
+        .one().id,
+    );
+  }
+
+  private upsertTrack(f: { title: string; artist: string; album?: string; year?: number; durationMs?: number; coverUrl?: string }): number {
+    const artists = splitArtists(f.artist);
+    const primaryId = this.getOrCreateArtist(artists[0]?.name ?? f.artist);
+    const norm = normalize(f.title);
+
+    let albumId: number | null = null;
+    if (f.album) albumId = this.getOrCreateAlbum(f.album, primaryId, { year: f.year, coverUrl: f.coverUrl });
+
+    let row = this.sql
+      .exec("SELECT id FROM tracks WHERE normalized_title = ? AND artist_id = ?", norm, primaryId)
+      .toArray()[0] as { id: number } | undefined;
+    let trackId: number;
+    if (row) {
+      trackId = row.id;
+      this.sql.exec(
+        "UPDATE tracks SET album_id = COALESCE(album_id, ?), duration_ms = COALESCE(duration_ms, ?) WHERE id = ?",
+        albumId,
+        f.durationMs ?? null,
+        trackId,
+      );
+    } else {
+      trackId = Number(
+        this.sql
+          .exec(
+            "INSERT INTO tracks (title, normalized_title, artist_id, album_id, duration_ms) VALUES (?, ?, ?, ?, ?) RETURNING id",
+            f.title,
+            norm,
+            primaryId,
+            albumId,
+            f.durationMs ?? null,
+          )
+          .one().id,
+      );
+    }
+
+    // Link every contributing artist (main/featured) for disaggregated browsing.
+    artists.forEach((a, i) => {
+      const aid = this.getOrCreateArtist(a.name);
+      this.sql.exec(
+        "INSERT OR IGNORE INTO track_artists (track_id, artist_id, position, role) VALUES (?, ?, ?, ?)",
+        trackId,
+        aid,
+        i,
+        a.role,
+      );
+    });
+    return trackId;
   }
 }
