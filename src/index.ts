@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { Env } from "./types";
 import { getLibrary } from "./types";
 import { addPage, artistPage, dashboard, libraryPage } from "./web/pages";
+import { handleWebhook, registerWebhook } from "./bot/telegram";
 
 // The Durable Object class must be exported from the Worker entrypoint.
 export { Library } from "./do/library";
@@ -39,5 +40,22 @@ app.post("/add", async (c) => {
 
 // Books arrive with Goodreads in M3.
 app.get("/books", (c) => c.text("books — coming in M3", 501));
+
+// --- Telegram bot ---
+// NOTE: exclude /telegram/webhook from Cloudflare Access — Telegram can't
+// authenticate through it. The webhook is guarded by its own secret_token.
+app.post("/telegram/webhook", (c) => handleWebhook(c.req.raw, c.env, c.executionCtx));
+
+// One-time webhook registration (behind Cloudflare Access in prod).
+app.get("/telegram/register", async (c) => {
+  const url = new URL(c.req.url);
+  const hook = `${url.origin}/telegram/webhook`;
+  try {
+    await registerWebhook(hook, c.env);
+    return c.text(`Webhook registered: ${hook}`);
+  } catch (e) {
+    return c.text(`Failed: ${e instanceof Error ? e.message : String(e)}`, 500);
+  }
+});
 
 export default app;

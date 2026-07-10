@@ -1,7 +1,7 @@
 import { html } from "hono/html";
 import type { HtmlEscapedString } from "hono/utils/html";
 import type { LibraryStats } from "../types";
-import type { ArtistSummary, SaveResult } from "../do/library";
+import type { ArtistDetail, ArtistSummary, RecentLink, SaveResult } from "../do/library";
 
 function layout(title: string, body: HtmlEscapedString | Promise<HtmlEscapedString>) {
   return html`<!doctype html>
@@ -46,7 +46,7 @@ const STAT_LABELS: [keyof LibraryStats, string][] = [
   ["links", "saved links"],
 ];
 
-export function dashboard(stats: LibraryStats, recent: Record<string, unknown>[]) {
+export function dashboard(stats: LibraryStats, recent: RecentLink[]) {
   const cards = STAT_LABELS.map(
     ([k, label]) => html`
       <div class="bg-white border border-slate-200 rounded-xl p-5">
@@ -139,11 +139,7 @@ export function libraryPage(artists: ArtistSummary[]) {
   return layout("Music · medialib", html`<h1 class="text-2xl font-bold tracking-tight mb-6">Music</h1>${body}`);
 }
 
-export function artistPage(detail: {
-  artist: { id: number; name: string; image_url: string | null; genres: string | null };
-  albums: Record<string, unknown>[];
-  tracks: Record<string, unknown>[];
-}) {
+export function artistPage(detail: ArtistDetail) {
   const { artist, albums, tracks } = detail;
   return layout(
     `${artist.name} · medialib`,

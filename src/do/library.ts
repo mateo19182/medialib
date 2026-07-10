@@ -23,6 +23,38 @@ export interface ArtistSummary {
   tracks: number;
 }
 
+export interface RecentLink {
+  id: number;
+  url: string;
+  source: string;
+  source_kind: string | null;
+  entity_type: string | null;
+  title: string | null;
+  status: string;
+  saved_at: string;
+  saved_via: string;
+}
+
+export interface AlbumRow {
+  id: number;
+  title: string;
+  year: number | null;
+  cover_url: string | null;
+}
+
+export interface TrackRow {
+  id: number;
+  title: string;
+  duration_ms: number | null;
+  album: string | null;
+}
+
+export interface ArtistDetail {
+  artist: { id: number; name: string; image_url: string | null; genres: string | null };
+  albums: AlbumRow[];
+  tracks: TrackRow[];
+}
+
 /**
  * The one Durable Object that owns the entire library: SQLite catalog + the
  * ingestion pipeline. Single-user, so a single instance addressed by a fixed
@@ -74,13 +106,13 @@ export class Library extends DurableObject<Env> {
     };
   }
 
-  recent(limit = 20): Record<string, unknown>[] {
+  recent(limit = 20): RecentLink[] {
     return this.sql
       .exec(
         "SELECT id, url, source, source_kind, entity_type, title, status, saved_at, saved_via FROM links ORDER BY saved_at DESC, id DESC LIMIT ?",
         limit,
       )
-      .toArray() as Record<string, unknown>[];
+      .toArray() as unknown as RecentLink[];
   }
 
   /** Artists that have at least one album or track, with counts, for /library. */
@@ -98,18 +130,14 @@ export class Library extends DurableObject<Env> {
   }
 
   /** Artist page: the artist plus their albums and tracks. */
-  artistDetail(id: number): {
-    artist: { id: number; name: string; image_url: string | null; genres: string | null };
-    albums: Record<string, unknown>[];
-    tracks: Record<string, unknown>[];
-  } | null {
+  artistDetail(id: number): ArtistDetail | null {
     const artist = this.sql.exec("SELECT id, name, image_url, genres FROM artists WHERE id = ?", id).toArray()[0] as
-      | { id: number; name: string; image_url: string | null; genres: string | null }
+      | ArtistDetail["artist"]
       | undefined;
     if (!artist) return null;
     const albums = this.sql
       .exec("SELECT id, title, year, cover_url FROM albums WHERE artist_id = ? ORDER BY year, title COLLATE NOCASE", id)
-      .toArray() as Record<string, unknown>[];
+      .toArray() as unknown as AlbumRow[];
     const tracks = this.sql
       .exec(
         `SELECT t.id, t.title, t.duration_ms, al.title AS album
@@ -117,8 +145,43 @@ export class Library extends DurableObject<Env> {
          WHERE t.artist_id = ? ORDER BY t.title COLLATE NOCASE`,
         id,
       )
-      .toArray() as Record<string, unknown>[];
+      .toArray() as unknown as TrackRow[];
     return { artist, albums, tracks };
+  }
+
+  /** Fuzzy search across artists, albums, tracks, and books. */
+  search(query: string, limit = 10): { type: string; id: number; name: string; sub: string }[] {
+    const like = `%${normalize(query)}%`;
+    if (like === "%%") return [];
+    const out: { type: string; id: number; name: string; sub: string }[] = [];
+    const add = (rows: unknown[], type: string, sub: (r: Record<string, unknown>) => string) => {
+      for (const r of rows as Record<string, unknown>[]) out.push({ type, id: Number(r.id), name: String(r.name), sub: sub(r) });
+    };
+    add(this.sql.exec("SELECT id, name FROM artists WHERE normalized_name LIKE ? LIMIT ?", like, limit).toArray(), "artist", () => "");
+    add(
+      this.sql
+        .exec(
+          "SELECT al.id, al.title AS name, a.name AS artist FROM albums al LEFT JOIN artists a ON a.id = al.artist_id WHERE al.normalized_title LIKE ? LIMIT ?",
+          like,
+          limit,
+        )
+        .toArray(),
+      "album",
+      (r) => String(r.artist ?? ""),
+    );
+    add(
+      this.sql
+        .exec(
+          "SELECT t.id, t.title AS name, a.name AS artist FROM tracks t LEFT JOIN artists a ON a.id = t.artist_id WHERE t.normalized_title LIKE ? LIMIT ?",
+          like,
+          limit,
+        )
+        .toArray(),
+      "track",
+      (r) => String(r.artist ?? ""),
+    );
+    add(this.sql.exec("SELECT id, title AS name FROM books WHERE normalized_title LIKE ? LIMIT ?", like, limit).toArray(), "book", () => "");
+    return out.slice(0, limit);
   }
 
   // --- ingestion -----------------------------------------------------------

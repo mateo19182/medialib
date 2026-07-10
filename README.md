@@ -39,3 +39,14 @@ npm run deploy
 ```
 
 Deploys to `*.workers.dev` to start; wire a custom domain + Cloudflare Access later.
+
+## Telegram bot
+
+1. Create a bot with [@BotFather](https://t.me/BotFather); note the token.
+2. Set secrets: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USER_ID` (your numeric id,
+   from [@userinfobot](https://t.me/userinfobot)), and a random `TELEGRAM_WEBHOOK_SECRET`.
+3. Register the webhook once: open `/telegram/register` on your deployment.
+4. Send the bot a Spotify/YouTube/Bandcamp/Goodreads link, or use `/search`, `/recent`, `/stats`.
+
+**Cloudflare Access:** protect all routes **except** `/telegram/webhook` — Telegram
+can't authenticate through Access. The webhook is guarded by its own secret token.
