@@ -1,18 +1,17 @@
 # secrets / local state
 .env
+.dev.vars
+.cache
 data/
-*.db
 
-# python
-__pycache__/
-*.py[cod]
-.venv/
-venv/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
+# cloudflare / wrangler
+.wrangler/
+node_modules/
+dist/
+.mf/
 
-# editor
+# misc
+*.log
+.DS_Store
 .vscode/
 .idea/
-.DS_Store
