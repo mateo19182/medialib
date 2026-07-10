@@ -1,7 +1,7 @@
 import { html } from "hono/html";
 import type { HtmlEscapedString } from "hono/utils/html";
 import type { LibraryStats } from "../types";
-import type { ArtistDetail, ArtistSummary, RecentLink, SaveResult } from "../do/library";
+import type { ArtistDetail, ArtistSummary, BookRow, RecentLink, SaveResult } from "../do/library";
 
 function layout(title: string, body: HtmlEscapedString | Promise<HtmlEscapedString>) {
   return html`<!doctype html>
@@ -137,6 +137,28 @@ export function libraryPage(artists: ArtistSummary[]) {
       </div>`
     : html`<p class="text-slate-500 text-sm">No music yet. <a class="underline" href="/add">Add a link</a>.</p>`;
   return layout("Music · medialib", html`<h1 class="text-2xl font-bold tracking-tight mb-6">Music</h1>${body}`);
+}
+
+const STATUS_LABEL: Record<string, string> = { want: "Want to read", reading: "Reading", read: "Read" };
+
+export function booksPage(books: BookRow[]) {
+  const body = books.length
+    ? html`<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
+        ${books.map(
+          (b) => html`
+            <div class="bg-white border border-slate-200 rounded-xl p-3">
+              ${b.cover_url
+                ? html`<img src="${b.cover_url}" alt="" class="w-full aspect-[2/3] rounded-lg object-cover mb-2 bg-slate-100" />`
+                : html`<div class="w-full aspect-[2/3] rounded-lg bg-slate-100 mb-2 flex items-center justify-center text-slate-300 text-2xl">📖</div>`}
+              <div class="text-sm font-medium leading-tight line-clamp-2">${b.title}</div>
+              ${b.author ? html`<div class="text-xs text-slate-500 truncate">${b.author}</div>` : ""}
+              ${b.reading_status ? html`<div class="text-[11px] text-emerald-600 mt-1">${STATUS_LABEL[b.reading_status] ?? b.reading_status}</div>` : ""}
+            </div>
+          `,
+        )}
+      </div>`
+    : html`<p class="text-slate-500 text-sm">No books yet. Send a Goodreads link to the bot or use <a class="underline" href="/add">Add</a>.</p>`;
+  return layout("Books · medialib", html`<h1 class="text-2xl font-bold tracking-tight mb-6">Books</h1>${body}`);
 }
 
 export function artistPage(detail: ArtistDetail) {

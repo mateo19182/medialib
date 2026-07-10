@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { Env } from "./types";
 import { getLibrary } from "./types";
-import { addPage, artistPage, dashboard, libraryPage } from "./web/pages";
+import { addPage, artistPage, booksPage, dashboard, libraryPage } from "./web/pages";
 import { handleWebhook, registerWebhook } from "./bot/telegram";
 
 // The Durable Object class must be exported from the Worker entrypoint.
@@ -38,8 +38,10 @@ app.post("/add", async (c) => {
   return c.html(addPage(result));
 });
 
-// Books arrive with Goodreads in M3.
-app.get("/books", (c) => c.text("books — coming in M3", 501));
+app.get("/books", async (c) => {
+  const books = await getLibrary(c.env).listBooks();
+  return c.html(booksPage(books));
+});
 
 // --- Telegram bot ---
 // NOTE: exclude /telegram/webhook from Cloudflare Access — Telegram can't

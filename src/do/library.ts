@@ -3,6 +3,7 @@ import type { Env, LibraryStats } from "../types";
 import { SCHEMA } from "../db/schema";
 import { classify, fetchMetadata } from "../ingest";
 import type { Fetched } from "../ingest";
+import type { FetchedBook } from "../ingest/types";
 import { normalize, splitArtists } from "../util";
 
 export interface SaveResult {
@@ -53,6 +54,15 @@ export interface ArtistDetail {
   artist: { id: number; name: string; image_url: string | null; genres: string | null };
   albums: AlbumRow[];
   tracks: TrackRow[];
+}
+
+export interface BookRow {
+  id: number;
+  title: string;
+  author: string | null;
+  cover_url: string | null;
+  year: number | null;
+  reading_status: string | null;
 }
 
 /**
@@ -147,6 +157,18 @@ export class Library extends DurableObject<Env> {
       )
       .toArray() as unknown as TrackRow[];
     return { artist, albums, tracks };
+  }
+
+  /** All books with their primary author, for /books. */
+  listBooks(): BookRow[] {
+    return this.sql
+      .exec(
+        `SELECT b.id, b.title, b.cover_url, b.year, b.reading_status,
+                (SELECT a.name FROM book_authors ba JOIN authors a ON a.id = ba.author_id
+                 WHERE ba.book_id = b.id ORDER BY ba.position LIMIT 1) AS author
+         FROM books b ORDER BY b.title COLLATE NOCASE`,
+      )
+      .toArray() as unknown as BookRow[];
   }
 
   /** Fuzzy search across artists, albums, tracks, and books. */
@@ -270,10 +292,70 @@ export class Library extends DurableObject<Env> {
         const id = this.upsertTrack(f);
         return { entityType: "track", entityId: id, title: f.title };
       }
-      case "book":
-        // Books arrive with Goodreads in M3.
-        throw new Error("book ingestion not implemented yet");
+      case "book": {
+        const id = this.getOrCreateBook(f);
+        return { entityType: "book", entityId: id, title: f.title };
+      }
     }
+  }
+
+  private getOrCreateAuthor(name: string): number {
+    const norm = normalize(name);
+    const row = this.sql.exec("SELECT id FROM authors WHERE normalized_name = ?", norm).toArray()[0] as
+      | { id: number }
+      | undefined;
+    if (row) return row.id;
+    return Number(
+      this.sql.exec("INSERT INTO authors (name, normalized_name) VALUES (?, ?) RETURNING id", name, norm).one().id,
+    );
+  }
+
+  private getOrCreateBook(f: FetchedBook): number {
+    const norm = normalize(f.title);
+    let row: { id: number } | undefined;
+    if (f.isbn) row = this.sql.exec("SELECT id FROM books WHERE isbn = ?", f.isbn).toArray()[0] as { id: number } | undefined;
+    if (!row)
+      row = this.sql.exec("SELECT id FROM books WHERE normalized_title = ? AND isbn IS NULL", norm).toArray()[0] as
+        | { id: number }
+        | undefined;
+
+    let bookId: number;
+    if (row) {
+      bookId = row.id;
+      this.sql.exec(
+        `UPDATE books SET isbn = COALESCE(isbn, ?), year = COALESCE(year, ?), page_count = COALESCE(page_count, ?),
+                          cover_url = COALESCE(cover_url, ?), description = COALESCE(description, ?) WHERE id = ?`,
+        f.isbn ?? null,
+        f.year ?? null,
+        f.pageCount ?? null,
+        f.coverUrl ?? null,
+        f.description ?? null,
+        bookId,
+      );
+    } else {
+      bookId = Number(
+        this.sql
+          .exec(
+            `INSERT INTO books (title, normalized_title, isbn, year, page_count, cover_url, description, reading_status)
+             VALUES (?, ?, ?, ?, ?, ?, ?, 'want') RETURNING id`,
+            f.title,
+            norm,
+            f.isbn ?? null,
+            f.year ?? null,
+            f.pageCount ?? null,
+            f.coverUrl ?? null,
+            f.description ?? null,
+          )
+          .one().id,
+      );
+    }
+
+    f.author.split(/,\s*/).forEach((name, i) => {
+      if (!name.trim()) return;
+      const authorId = this.getOrCreateAuthor(name.trim());
+      this.sql.exec("INSERT OR IGNORE INTO book_authors (book_id, author_id, position) VALUES (?, ?, ?)", bookId, authorId, i);
+    });
+    return bookId;
   }
 
   private getOrCreateArtist(name: string, imageUrl?: string): number {

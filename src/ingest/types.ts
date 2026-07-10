@@ -37,6 +37,8 @@ export interface FetchedBook {
   author: string;
   isbn?: string;
   year?: number;
+  pageCount?: number;
+  description?: string;
   coverUrl?: string;
 }
 

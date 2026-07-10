@@ -44,3 +44,31 @@ export function jsonLd(html: string): unknown[] {
   }
   return out;
 }
+
+type LdNode = Record<string, unknown>;
+
+function typeMatches(t: unknown, want: string[]): boolean {
+  const types = Array.isArray(t) ? t : [t];
+  return types.some((x) => typeof x === "string" && want.includes(x));
+}
+
+/**
+ * Find the first JSON-LD node matching any of the given @types, searching
+ * top-level nodes and any @graph arrays.
+ */
+export function ldFind(blocks: unknown[], ...types: string[]): LdNode | null {
+  for (const block of blocks) {
+    const nodes = Array.isArray(block) ? block : [block];
+    for (const node of nodes) {
+      if (!node || typeof node !== "object") continue;
+      const n = node as LdNode;
+      if (typeMatches(n["@type"], types)) return n;
+      const graph = n["@graph"];
+      if (Array.isArray(graph)) {
+        const hit = graph.find((g) => g && typeof g === "object" && typeMatches((g as LdNode)["@type"], types));
+        if (hit) return hit as LdNode;
+      }
+    }
+  }
+  return null;
+}

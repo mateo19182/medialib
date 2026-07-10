@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import { classify } from "../src/ingest/classify";
 import { parseSpotify } from "../src/ingest/spotify";
 import { videoToTrack } from "../src/ingest/youtube";
+import { parseBandcamp } from "../src/ingest/bandcamp";
+import { parseGoodreads } from "../src/ingest/goodreads";
 import { splitArtists, normalize, iso8601ToMs } from "../src/util";
 
 describe("classify", () => {
@@ -82,6 +84,57 @@ describe("videoToTrack", () => {
 
   it("falls back to channel, stripping ' - Topic'", () => {
     expect(videoToTrack("Some Song", "Some Artist - Topic")).toMatchObject({ artist: "Some Artist", title: "Some Song" });
+  });
+});
+
+describe("parseBandcamp", () => {
+  it("parses an album from JSON-LD", () => {
+    const node = {
+      "@type": "MusicAlbum",
+      name: "Minecraft - Volume Alpha",
+      byArtist: "C418",
+      datePublished: "04 Mar 2011 00:00:00 GMT",
+      image: "https://f4.bcbits.com/img/a.jpg",
+    };
+    expect(parseBandcamp(node, {}, "album")).toEqual({
+      entityType: "album",
+      title: "Minecraft - Volume Alpha",
+      artist: "C418",
+      year: 2011,
+      coverUrl: "https://f4.bcbits.com/img/a.jpg",
+    });
+  });
+
+  it("parses a track with byArtist/inAlbum objects", () => {
+    const node = { "@type": "MusicRecording", name: "Sweden", byArtist: { name: "C418" }, inAlbum: { name: "Volume Alpha" } };
+    expect(parseBandcamp(node, {}, "track")).toMatchObject({ entityType: "track", title: "Sweden", artist: "C418", album: "Volume Alpha" });
+  });
+
+  it("falls back to og:title '…, by Artist' when JSON-LD is missing", () => {
+    const og = { "og:title": "Cool Record, by Some Artist", "og:image": "https://x/i.jpg", "og:site_name": "Some Artist" };
+    expect(parseBandcamp(null, og, "album")).toMatchObject({ title: "Cool Record", artist: "Some Artist" });
+  });
+});
+
+describe("parseGoodreads", () => {
+  it("parses a book, decoding entities", () => {
+    const node = {
+      "@type": "Book",
+      name: "Atomic Habits: An Easy &amp; Proven Way",
+      author: ["James Clear"],
+      numberOfPages: 319,
+      image: "https://m.media-amazon.com/x.jpg",
+    };
+    expect(parseGoodreads(node, { "og:description": "A book about habits." })).toEqual({
+      entityType: "book",
+      title: "Atomic Habits: An Easy & Proven Way",
+      author: "James Clear",
+      isbn: undefined,
+      year: undefined,
+      pageCount: 319,
+      description: "A book about habits.",
+      coverUrl: "https://m.media-amazon.com/x.jpg",
+    });
   });
 });
 

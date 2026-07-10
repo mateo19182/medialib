@@ -2,6 +2,8 @@ import type { Env } from "../types";
 import type { Classified, Fetched } from "./types";
 import { fetchSpotify } from "./spotify";
 import { fetchYouTube } from "./youtube";
+import { fetchBandcamp } from "./bandcamp";
+import { fetchGoodreads } from "./goodreads";
 
 export { classify } from "./classify";
 export type { Classified, Fetched, EntityType, Source, SourceKind } from "./types";
@@ -17,6 +19,10 @@ export async function fetchMetadata(c: Classified, env: Env): Promise<Fetched | 
       return fetchSpotify(c);
     case "youtube":
       return fetchYouTube(c, env);
+    case "bandcamp":
+      return fetchBandcamp(c);
+    case "goodreads":
+      return fetchGoodreads(c);
     default:
       return null;
   }
