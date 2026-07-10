@@ -326,6 +326,25 @@ def enrich():
 
 
 # ----------------------------------------------------------------------------
+# Spotify Wrapped / Sound Capsule (read from saved data export)
+# ----------------------------------------------------------------------------
+@app.get("/wrapped", response_class=HTMLResponse)
+def wrapped(request: Request):
+    from medialib.core import wrapped as wrapped_mod
+
+    return TEMPLATES.TemplateResponse(
+        request,
+        "wrapped.html",
+        {
+            "status": _status(),
+            "available": wrapped_mod.is_available(),
+            "wrapped": wrapped_mod.load_wrapped() if wrapped_mod.is_available() else None,
+            "capsule": wrapped_mod.load_capsule() if wrapped_mod.is_available() else None,
+        },
+    )
+
+
+# ----------------------------------------------------------------------------
 # Background jobs: progress + status
 # ----------------------------------------------------------------------------
 @app.get("/jobs/{job_id}", response_class=HTMLResponse)

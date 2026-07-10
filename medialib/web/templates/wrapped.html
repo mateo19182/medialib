@@ -1,0 +1,213 @@
+{% extends "base.html" %}
+{% block title %}Wrapped · musiclib{% endblock %}
+{% block content %}
+
+<div class="mb-8">
+  <h1 class="text-3xl font-bold tracking-tight">Spotify Wrapped {{ wrapped.year if wrapped else '' }}</h1>
+  <p class="text-slate-500 mt-1">Pulled from your saved Spotify data export.</p>
+</div>
+
+{% if not available %}
+<div class="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-3 rounded-lg text-sm">
+  No Spotify export found. Place your unzipped export under
+  <code class="text-xs bg-amber-100 px-1.5 py-0.5 rounded">data/spotify_export/</code>.
+</div>
+{% elif not wrapped %}
+<div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg text-sm">
+  Could not read <code>Wrapped2025.json</code> from the export.
+</div>
+{% else %}
+
+{% if not status.spotify %}
+<div class="bg-slate-100 border border-slate-200 text-slate-600 px-4 py-3 rounded-lg text-sm mb-6">
+  <a href="/auth/spotify" class="underline font-medium">Connect Spotify</a> to resolve top artist/album/track
+  names & cover art (the export only stores IDs). Everything else shows regardless.
+</div>
+{% endif %}
+
+<!-- headline stats -->
+<div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-8">
+  <div class="bg-white border border-slate-200 rounded-xl p-5">
+    <div class="text-3xl font-bold tracking-tight">{{ '{:,}'.format(wrapped.total_minutes) }}</div>
+    <div class="text-sm text-slate-500 mt-0.5">minutes listened</div>
+    <div class="text-xs text-slate-400 mt-0.5">≈ {{ '{:,}'.format(wrapped.total_hours) }} hours</div>
+  </div>
+  {% if wrapped.num_unique_artists is not none %}
+  <div class="bg-white border border-slate-200 rounded-xl p-5">
+    <div class="text-3xl font-bold tracking-tight">{{ '{:,}'.format(wrapped.num_unique_artists) }}</div>
+    <div class="text-sm text-slate-500 mt-0.5">unique artists</div>
+  </div>
+  {% endif %}
+  {% if wrapped.num_unique_tracks is not none %}
+  <div class="bg-white border border-slate-200 rounded-xl p-5">
+    <div class="text-3xl font-bold tracking-tight">{{ '{:,}'.format(wrapped.num_unique_tracks) }}</div>
+    <div class="text-sm text-slate-500 mt-0.5">unique tracks</div>
+  </div>
+  {% endif %}
+  {% if wrapped.top_fan_percentile is not none %}
+  <div class="bg-white border border-slate-200 rounded-xl p-5">
+    <div class="text-3xl font-bold tracking-tight">Top {{ (wrapped.top_fan_percentile * 100) | round(1) }}%</div>
+    <div class="text-sm text-slate-500 mt-0.5">fan of your #1 artist</div>
+  </div>
+  {% endif %}
+  {% if wrapped.listening_age and wrapped.listening_age.age %}
+  <div class="bg-white border border-slate-200 rounded-xl p-5">
+    <div class="text-3xl font-bold tracking-tight">{{ wrapped.listening_age.age }}</div>
+    <div class="text-sm text-slate-500 mt-0.5">listening age</div>
+    <div class="text-xs text-slate-400 mt-0.5">{{ wrapped.listening_age.phase }} {{ wrapped.listening_age.start_year }}s</div>
+  </div>
+  {% endif %}
+  {% if wrapped.num_completed_albums is not none %}
+  <div class="bg-white border border-slate-200 rounded-xl p-5">
+    <div class="text-3xl font-bold tracking-tight">{{ wrapped.num_completed_albums }}</div>
+    <div class="text-sm text-slate-500 mt-0.5">albums completed</div>
+  </div>
+  {% endif %}
+  {% if wrapped.num_genres is not none %}
+  <div class="bg-white border border-slate-200 rounded-xl p-5">
+    <div class="text-3xl font-bold tracking-tight">{{ wrapped.num_genres }}</div>
+    <div class="text-sm text-slate-500 mt-0.5">genres explored</div>
+  </div>
+  {% endif %}
+  {% if wrapped.club %}
+  <div class="bg-white border border-slate-200 rounded-xl p-5">
+    <div class="text-lg font-bold tracking-tight leading-tight">{{ wrapped.club.name }}</div>
+    <div class="text-sm text-slate-500 mt-0.5">{{ wrapped.club.role }}</div>
+  </div>
+  {% endif %}
+</div>
+
+{% macro entity_row(items, badge_label=None) %}
+<div class="divide-y divide-slate-100">
+  {% for it in items %}
+  <a href="{{ it.url }}" target="_blank" rel="noopener" class="flex items-center gap-3 py-2.5 px-1 hover:bg-slate-50 rounded-lg transition-colors">
+    <span class="text-slate-400 text-sm w-5 text-right tabular-nums">{{ loop.index }}</span>
+    {% if it.image %}
+    <img src="{{ it.image }}" alt="" class="w-11 h-11 rounded object-cover bg-slate-100">
+    {% else %}
+    <span class="w-11 h-11 rounded bg-slate-100 flex items-center justify-center text-slate-300 text-xs">♪</span>
+    {% endif %}
+    <span class="min-w-0 flex-1">
+      <span class="block font-medium text-sm truncate">{{ it.name }}</span>
+      {% if it.subtitle %}<span class="block text-xs text-slate-500 truncate">{{ it.subtitle }}</span>{% endif %}
+    </span>
+    {% if it.count is defined and it.count is not none %}
+    <span class="text-xs text-slate-400 tabular-nums whitespace-nowrap">{{ it.count }} plays · {{ (it.ms / 60000) | round | int }} min</span>
+    {% endif %}
+  </a>
+  {% endfor %}
+</div>
+{% endmacro %}
+
+<div class="grid md:grid-cols-2 gap-4 mb-4">
+  {% if wrapped.top_artists %}
+  <div class="bg-white border border-slate-200 rounded-xl p-5">
+    <h2 class="font-semibold mb-2">Top artists</h2>
+    {{ entity_row(wrapped.top_artists) }}
+  </div>
+  {% endif %}
+  {% if wrapped.top_tracks %}
+  <div class="bg-white border border-slate-200 rounded-xl p-5">
+    <h2 class="font-semibold mb-2">Top tracks</h2>
+    {{ entity_row(wrapped.top_tracks) }}
+  </div>
+  {% endif %}
+</div>
+
+<div class="grid md:grid-cols-2 gap-4 mb-4">
+  {% if wrapped.top_albums %}
+  <div class="bg-white border border-slate-200 rounded-xl p-5">
+    <h2 class="font-semibold mb-2">Top albums</h2>
+    {{ entity_row(wrapped.top_albums) }}
+  </div>
+  {% endif %}
+  {% if wrapped.top_podcasts %}
+  <div class="bg-white border border-slate-200 rounded-xl p-5">
+    <h2 class="font-semibold mb-2">Top podcasts <span class="text-xs font-normal text-slate-400">· {{ wrapped.podcast_hours }}h</span></h2>
+    {{ entity_row(wrapped.top_podcasts) }}
+  </div>
+  {% endif %}
+</div>
+
+{% if wrapped.party %}
+<div class="bg-white border border-slate-200 rounded-xl p-5 mb-4">
+  <h2 class="font-semibold mb-3">The numbers</h2>
+  <div class="grid grid-cols-2 md:grid-cols-3 gap-4">
+    {% for f in wrapped.party %}
+    <div>
+      <div class="text-xl font-bold tracking-tight">{{ f.value }}</div>
+      <div class="text-xs text-slate-500">{{ f.label }}</div>
+    </div>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
+
+{% if wrapped.artist_race %}
+<div class="bg-white border border-slate-200 rounded-xl p-5 mb-4 overflow-x-auto scroll-thin">
+  <h2 class="font-semibold mb-3">Top artist race <span class="text-xs font-normal text-slate-400">· monthly rank</span></h2>
+  <table class="w-full text-sm border-collapse min-w-[560px]">
+    <thead>
+      <tr class="text-xs text-slate-400">
+        <th class="text-left font-medium pb-2 pr-3">Artist</th>
+        {% for m in ['J','F','M','A','M','J','J','A','S','O','N','D'] %}
+        <th class="font-medium pb-2 w-8 text-center">{{ m }}</th>
+        {% endfor %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in wrapped.artist_race %}
+      <tr class="border-t border-slate-100">
+        <td class="py-1.5 pr-3"><a href="{{ a.url }}" target="_blank" rel="noopener" class="hover:underline font-medium truncate block max-w-[180px]">{{ a.name }}</a></td>
+        {% for r in a.ranks %}
+        <td class="text-center py-1.5">
+          {% if r %}<span class="inline-flex items-center justify-center w-6 h-6 rounded-full bg-emerald-50 text-emerald-700 text-xs tabular-nums">{{ r }}</span>
+          {% else %}<span class="text-slate-200">·</span>{% endif %}
+        </td>
+        {% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% if capsule %}
+<div class="grid md:grid-cols-2 gap-4 mb-4">
+  {% if capsule.highlights %}
+  <div class="bg-white border border-slate-200 rounded-xl p-5">
+    <h2 class="font-semibold mb-2">Recent highlights <span class="text-xs font-normal text-slate-400">· Sound Capsule</span></h2>
+    <div class="divide-y divide-slate-100">
+      {% for h in capsule.highlights %}
+      <div class="py-2 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <div class="text-sm font-medium">{{ h.type }}</div>
+          {% if h.detail %}<div class="text-xs text-slate-500 truncate">{{ h.detail }}</div>{% endif %}
+        </div>
+        <div class="text-xs text-slate-400 whitespace-nowrap">{{ h.date }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+  {% if capsule.days %}
+  <div class="bg-white border border-slate-200 rounded-xl p-5">
+    <h2 class="font-semibold mb-2">Recent days <span class="text-xs font-normal text-slate-400">· {{ capsule.total_minutes }} min total</span></h2>
+    <div class="divide-y divide-slate-100">
+      {% for d in capsule.days %}
+      <div class="py-2 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <div class="text-sm font-medium">{{ d.date }}</div>
+          {% if d.top_track %}<div class="text-xs text-slate-500 truncate">{{ d.top_track }}</div>{% endif %}
+        </div>
+        <div class="text-xs text-slate-400 whitespace-nowrap tabular-nums">{{ d.minutes }} min</div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
+{% endif %}
+{% endblock %}
