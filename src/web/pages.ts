@@ -31,6 +31,11 @@ function layout(title: string, body: HtmlEscapedString | Promise<HtmlEscapedStri
     </html>`;
 }
 
+/** Prefer the R2-cached image; fall back to the source hotlink. */
+function mediaSrc(key: string | null, url: string | null): string | null {
+  return key ? `/media/${key}` : url;
+}
+
 function fmtDuration(ms: unknown): string {
   const n = Number(ms);
   if (!Number.isFinite(n) || n <= 0) return "";
@@ -124,8 +129,8 @@ export function libraryPage(artists: ArtistSummary[]) {
         ${artists.map(
           (a) => html`
             <a href="/artist/${a.id}" class="flex items-center gap-3 bg-white border border-slate-200 rounded-xl p-4 hover:border-slate-300">
-              ${a.image_url
-                ? html`<img src="${a.image_url}" alt="" class="w-12 h-12 rounded-full object-cover bg-slate-100" />`
+              ${mediaSrc(a.image_key, a.image_url)
+                ? html`<img src="${mediaSrc(a.image_key, a.image_url)}" alt="" class="w-12 h-12 rounded-full object-cover bg-slate-100" />`
                 : html`<span class="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center text-slate-300">♪</span>`}
               <span class="min-w-0">
                 <span class="block font-medium truncate">${a.name}</span>
@@ -147,8 +152,8 @@ export function booksPage(books: BookRow[]) {
         ${books.map(
           (b) => html`
             <div class="bg-white border border-slate-200 rounded-xl p-3">
-              ${b.cover_url
-                ? html`<img src="${b.cover_url}" alt="" class="w-full aspect-[2/3] rounded-lg object-cover mb-2 bg-slate-100" />`
+              ${mediaSrc(b.cover_key, b.cover_url)
+                ? html`<img src="${mediaSrc(b.cover_key, b.cover_url)}" alt="" class="w-full aspect-[2/3] rounded-lg object-cover mb-2 bg-slate-100" />`
                 : html`<div class="w-full aspect-[2/3] rounded-lg bg-slate-100 mb-2 flex items-center justify-center text-slate-300 text-2xl">📖</div>`}
               <div class="text-sm font-medium leading-tight line-clamp-2">${b.title}</div>
               ${b.author ? html`<div class="text-xs text-slate-500 truncate">${b.author}</div>` : ""}
@@ -168,8 +173,8 @@ export function artistPage(detail: ArtistDetail) {
     html`
       <a href="/library" class="text-sm text-slate-500 hover:underline">← Music</a>
       <div class="flex items-center gap-4 mt-3 mb-8">
-        ${artist.image_url
-          ? html`<img src="${artist.image_url}" alt="" class="w-20 h-20 rounded-full object-cover bg-slate-100" />`
+        ${mediaSrc(artist.image_key, artist.image_url)
+          ? html`<img src="${mediaSrc(artist.image_key, artist.image_url)}" alt="" class="w-20 h-20 rounded-full object-cover bg-slate-100" />`
           : html`<span class="w-20 h-20 rounded-full bg-slate-100 flex items-center justify-center text-slate-300 text-2xl">♪</span>`}
         <div>
           <h1 class="text-2xl font-bold tracking-tight">${artist.name}</h1>
@@ -182,8 +187,8 @@ export function artistPage(detail: ArtistDetail) {
               ${albums.map(
                 (al) => html`
                   <div class="bg-white border border-slate-200 rounded-xl p-3">
-                    ${al.cover_url
-                      ? html`<img src="${String(al.cover_url)}" alt="" class="w-full aspect-square rounded-lg object-cover mb-2 bg-slate-100" />`
+                    ${mediaSrc(al.cover_key, al.cover_url)
+                      ? html`<img src="${mediaSrc(al.cover_key, al.cover_url)}" alt="" class="w-full aspect-square rounded-lg object-cover mb-2 bg-slate-100" />`
                       : html`<div class="w-full aspect-square rounded-lg bg-slate-100 mb-2"></div>`}
                     <div class="text-sm font-medium truncate">${String(al.title)}</div>
                     ${al.year ? html`<div class="text-xs text-slate-400">${String(al.year)}</div>` : ""}

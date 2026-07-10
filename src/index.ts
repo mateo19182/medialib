@@ -11,6 +11,18 @@ const app = new Hono<{ Bindings: Env }>();
 
 app.get("/health", (c) => c.json({ status: "ok" }));
 
+// Cached cover art / images from R2.
+app.get("/media/:key{.+}", async (c) => {
+  const obj = await c.env.MEDIA.get(c.req.param("key"));
+  if (!obj) return c.notFound();
+  return new Response(obj.body, {
+    headers: {
+      "content-type": obj.httpMetadata?.contentType ?? "image/jpeg",
+      "cache-control": "public, max-age=31536000, immutable",
+    },
+  });
+});
+
 app.get("/", async (c) => {
   const lib = getLibrary(c.env);
   const [stats, recent] = await Promise.all([lib.stats(), lib.recent(20)]);

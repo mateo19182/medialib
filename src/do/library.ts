@@ -5,6 +5,13 @@ import { classify, fetchMetadata } from "../ingest";
 import type { Fetched } from "../ingest";
 import type { FetchedBook } from "../ingest/types";
 import { normalize, splitArtists } from "../util";
+import * as mb from "../enrich/musicbrainz";
+import { enrichBook } from "../enrich/openlibrary";
+import { cacheImage } from "../r2";
+
+/** MusicBrainz asks for ~1 req/s; process one queue item per alarm tick. */
+const ENRICH_INTERVAL_MS = 1100;
+const MAX_ATTEMPTS = 3;
 
 export interface SaveResult {
   ok: boolean;
@@ -20,6 +27,7 @@ export interface ArtistSummary {
   id: number;
   name: string;
   image_url: string | null;
+  image_key: string | null;
   albums: number;
   tracks: number;
 }
@@ -41,6 +49,7 @@ export interface AlbumRow {
   title: string;
   year: number | null;
   cover_url: string | null;
+  cover_key: string | null;
 }
 
 export interface TrackRow {
@@ -51,7 +60,7 @@ export interface TrackRow {
 }
 
 export interface ArtistDetail {
-  artist: { id: number; name: string; image_url: string | null; genres: string | null };
+  artist: { id: number; name: string; image_url: string | null; image_key: string | null; genres: string | null };
   albums: AlbumRow[];
   tracks: TrackRow[];
 }
@@ -61,6 +70,7 @@ export interface BookRow {
   title: string;
   author: string | null;
   cover_url: string | null;
+  cover_key: string | null;
   year: number | null;
   reading_status: string | null;
 }
@@ -129,7 +139,7 @@ export class Library extends DurableObject<Env> {
   listArtists(): ArtistSummary[] {
     return this.sql
       .exec(
-        `SELECT a.id, a.name, a.image_url,
+        `SELECT a.id, a.name, a.image_url, a.image_key,
                 (SELECT COUNT(*) FROM albums al WHERE al.artist_id = a.id) AS albums,
                 (SELECT COUNT(*) FROM tracks t WHERE t.artist_id = a.id) AS tracks
          FROM artists a
@@ -141,12 +151,12 @@ export class Library extends DurableObject<Env> {
 
   /** Artist page: the artist plus their albums and tracks. */
   artistDetail(id: number): ArtistDetail | null {
-    const artist = this.sql.exec("SELECT id, name, image_url, genres FROM artists WHERE id = ?", id).toArray()[0] as
+    const artist = this.sql.exec("SELECT id, name, image_url, image_key, genres FROM artists WHERE id = ?", id).toArray()[0] as
       | ArtistDetail["artist"]
       | undefined;
     if (!artist) return null;
     const albums = this.sql
-      .exec("SELECT id, title, year, cover_url FROM albums WHERE artist_id = ? ORDER BY year, title COLLATE NOCASE", id)
+      .exec("SELECT id, title, year, cover_url, cover_key FROM albums WHERE artist_id = ? ORDER BY year, title COLLATE NOCASE", id)
       .toArray() as unknown as AlbumRow[];
     const tracks = this.sql
       .exec(
@@ -163,7 +173,7 @@ export class Library extends DurableObject<Env> {
   listBooks(): BookRow[] {
     return this.sql
       .exec(
-        `SELECT b.id, b.title, b.cover_url, b.year, b.reading_status,
+        `SELECT b.id, b.title, b.cover_url, b.cover_key, b.year, b.reading_status,
                 (SELECT a.name FROM book_authors ba JOIN authors a ON a.id = ba.author_id
                  WHERE ba.book_id = b.id ORDER BY ba.position LIMIT 1) AS author
          FROM books b ORDER BY b.title COLLATE NOCASE`,
@@ -243,6 +253,9 @@ export class Library extends DurableObject<Env> {
       entityType = up.entityType;
       entityId = up.entityId;
       title = up.title;
+      this.enqueueEnrich(entityType, entityId);
+      this.enqueueRelated(entityType, entityId);
+      await this.scheduleEnrich();
     }
     const status = fetched ? "ok" : error ? "error" : "pending";
 
@@ -275,6 +288,151 @@ export class Library extends DurableObject<Env> {
     }
 
     return { ok: true, linkId, status, entityType, title, error };
+  }
+
+  // --- background enrichment (alarm-driven) --------------------------------
+
+  private enqueueEnrich(entityType: string, entityId: number): void {
+    this.sql.exec("INSERT OR IGNORE INTO enrich_queue (entity_type, entity_id) VALUES (?, ?)", entityType, entityId);
+  }
+
+  /** Also enrich the artist/album that a saved track (or album) hangs off of. */
+  private enqueueRelated(entityType: string, entityId: number): void {
+    if (entityType === "track") {
+      const t = this.sql.exec("SELECT artist_id, album_id FROM tracks WHERE id = ?", entityId).toArray()[0] as
+        | { artist_id: number | null; album_id: number | null }
+        | undefined;
+      if (t?.artist_id) this.enqueueEnrich("artist", t.artist_id);
+      if (t?.album_id) this.enqueueEnrich("album", t.album_id);
+    } else if (entityType === "album") {
+      const al = this.sql.exec("SELECT artist_id FROM albums WHERE id = ?", entityId).toArray()[0] as
+        | { artist_id: number | null }
+        | undefined;
+      if (al?.artist_id) this.enqueueEnrich("artist", al.artist_id);
+    }
+  }
+
+  /** Arm the alarm if there's queued work and none is scheduled yet. */
+  private async scheduleEnrich(): Promise<void> {
+    const pending = Number(this.sql.exec("SELECT COUNT(*) AS n FROM enrich_queue").one().n);
+    if (pending === 0) return;
+    if ((await this.ctx.storage.getAlarm()) === null) await this.ctx.storage.setAlarm(Date.now() + 50);
+  }
+
+  /** Drain one enrich_queue item per tick, then reschedule if more remain. */
+  async alarm(): Promise<void> {
+    const item = this.sql
+      .exec("SELECT id, entity_type, entity_id, attempts FROM enrich_queue ORDER BY id LIMIT 1")
+      .toArray()[0] as { id: number; entity_type: string; entity_id: number; attempts: number } | undefined;
+
+    if (item) {
+      try {
+        await this.enrichOne(item.entity_type, item.entity_id);
+        this.sql.exec("DELETE FROM enrich_queue WHERE id = ?", item.id);
+      } catch (e) {
+        console.error("enrich failed", item.entity_type, item.entity_id, e);
+        if (item.attempts + 1 >= MAX_ATTEMPTS) this.sql.exec("DELETE FROM enrich_queue WHERE id = ?", item.id);
+        else this.sql.exec("UPDATE enrich_queue SET attempts = attempts + 1 WHERE id = ?", item.id);
+      }
+    }
+
+    const remaining = Number(this.sql.exec("SELECT COUNT(*) AS n FROM enrich_queue").one().n);
+    if (remaining > 0) await this.ctx.storage.setAlarm(Date.now() + ENRICH_INTERVAL_MS);
+  }
+
+  private async enrichOne(type: string, id: number): Promise<void> {
+    switch (type) {
+      case "artist":
+        return this.enrichArtistRow(id);
+      case "album":
+        return this.enrichAlbumRow(id);
+      case "track":
+        return this.enrichTrackRow(id);
+      case "book":
+        return this.enrichBookRow(id);
+    }
+  }
+
+  private async enrichArtistRow(id: number): Promise<void> {
+    const row = this.sql.exec("SELECT name, image_url, image_key FROM artists WHERE id = ?", id).toArray()[0] as
+      | { name: string; image_url: string | null; image_key: string | null }
+      | undefined;
+    if (!row) return;
+    const res = await mb.enrichArtist(row.name);
+    let imageKey = row.image_key;
+    if (!imageKey && row.image_url) imageKey = await cacheImage(this.env, row.image_url, `artist/${id}`);
+    this.sql.exec(
+      "UPDATE artists SET mbid = COALESCE(mbid, ?), genres = COALESCE(genres, ?), image_key = COALESCE(image_key, ?), enriched_at = datetime('now') WHERE id = ?",
+      res?.mbid ?? null,
+      res?.genres ?? null,
+      imageKey ?? null,
+      id,
+    );
+  }
+
+  private async enrichAlbumRow(id: number): Promise<void> {
+    const row = this.sql
+      .exec(
+        "SELECT al.title, al.cover_url, al.cover_key, a.name AS artist FROM albums al LEFT JOIN artists a ON a.id = al.artist_id WHERE al.id = ?",
+        id,
+      )
+      .toArray()[0] as { title: string; cover_url: string | null; cover_key: string | null; artist: string | null } | undefined;
+    if (!row) return;
+    const res = await mb.enrichRelease(row.title, row.artist ?? "");
+    let coverUrl = row.cover_url;
+    if (!coverUrl && res?.mbid) coverUrl = mb.coverArtUrl(res.mbid);
+    let coverKey = row.cover_key;
+    if (!coverKey && coverUrl) coverKey = await cacheImage(this.env, coverUrl, `album/${id}`);
+    this.sql.exec(
+      "UPDATE albums SET mbid = COALESCE(mbid, ?), year = COALESCE(year, ?), cover_url = COALESCE(cover_url, ?), cover_key = COALESCE(cover_key, ?), enriched_at = datetime('now') WHERE id = ?",
+      res?.mbid ?? null,
+      res?.year ?? null,
+      coverUrl ?? null,
+      coverKey ?? null,
+      id,
+    );
+  }
+
+  private async enrichTrackRow(id: number): Promise<void> {
+    const row = this.sql
+      .exec("SELECT t.title, t.isrc, a.name AS artist FROM tracks t LEFT JOIN artists a ON a.id = t.artist_id WHERE t.id = ?", id)
+      .toArray()[0] as { title: string; isrc: string | null; artist: string | null } | undefined;
+    if (!row) return;
+    const res = await mb.enrichRecording(row.title, row.artist ?? "");
+    this.sql.exec(
+      "UPDATE tracks SET mbid = COALESCE(mbid, ?), isrc = COALESCE(isrc, ?) WHERE id = ?",
+      res?.mbid ?? null,
+      res?.isrc ?? null,
+      id,
+    );
+  }
+
+  private async enrichBookRow(id: number): Promise<void> {
+    const row = this.sql
+      .exec(
+        `SELECT b.title, b.isbn, b.cover_url, b.cover_key,
+                (SELECT a.name FROM book_authors ba JOIN authors a ON a.id = ba.author_id WHERE ba.book_id = b.id ORDER BY ba.position LIMIT 1) AS author
+         FROM books b WHERE b.id = ?`,
+        id,
+      )
+      .toArray()[0] as
+      | { title: string; isbn: string | null; cover_url: string | null; cover_key: string | null; author: string | null }
+      | undefined;
+    if (!row) return;
+    const res = await enrichBook({ title: row.title, author: row.author ?? "Unknown", isbn: row.isbn ?? undefined });
+    let coverUrl = row.cover_url ?? res?.coverUrl ?? null;
+    let coverKey = row.cover_key;
+    if (!coverKey && coverUrl) coverKey = await cacheImage(this.env, coverUrl, `book/${id}`);
+    this.sql.exec(
+      `UPDATE books SET olid = COALESCE(olid, ?), page_count = COALESCE(page_count, ?), year = COALESCE(year, ?),
+                        cover_url = COALESCE(cover_url, ?), cover_key = COALESCE(cover_key, ?), enriched_at = datetime('now') WHERE id = ?`,
+      res?.olid ?? null,
+      res?.pageCount ?? null,
+      res?.year ?? null,
+      coverUrl,
+      coverKey ?? null,
+      id,
+    );
   }
 
   private upsertEntity(f: Fetched): { entityType: string; entityId: number; title: string } {

@@ -130,4 +130,14 @@ export const SCHEMA: string[] = [
      key TEXT PRIMARY KEY,
      value TEXT
    )`,
+
+  // --- background enrichment queue (drained by the DO alarm) ---------------
+  `CREATE TABLE IF NOT EXISTS enrich_queue (
+     id INTEGER PRIMARY KEY AUTOINCREMENT,
+     entity_type TEXT NOT NULL,      -- artist | album | track | book
+     entity_id INTEGER NOT NULL,
+     attempts INTEGER NOT NULL DEFAULT 0,
+     created_at TEXT NOT NULL DEFAULT (datetime('now')),
+     UNIQUE(entity_type, entity_id)
+   )`,
 ];
