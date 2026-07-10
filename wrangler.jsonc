@@ -6,6 +6,9 @@
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
 
+  "routes": [{ "pattern": "medialib.m19182.dev", "custom_domain": true }],
+  "workers_dev": false,
+
   "durable_objects": {
     "bindings": [{ "name": "LIBRARY", "class_name": "Library" }]
   },
