@@ -29,4 +29,5 @@ export interface LibraryStats {
   albums: number;
   books: number;
   links: number;
+  pending: number;
 }

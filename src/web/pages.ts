@@ -1,7 +1,7 @@
 import { html } from "hono/html";
 import type { HtmlEscapedString } from "hono/utils/html";
 import type { LibraryStats } from "../types";
-import type { ArtistDetail, ArtistSummary, BookRow, RecentLink, SaveResult } from "../do/library";
+import type { ArtistDetail, ArtistSummary, BookDetail, BookRow, RecentLink, SaveResult } from "../do/library";
 
 function layout(title: string, body: HtmlEscapedString | Promise<HtmlEscapedString>) {
   return html`<!doctype html>
@@ -43,6 +43,34 @@ function fmtDuration(ms: unknown): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
+/** Interactive 1–5 star rating (clicking the current value clears it). */
+export function stars(kind: "track" | "album" | "book", id: number, rating: number | null) {
+  const r = rating ?? 0;
+  return html`<span class="stars inline-flex gap-0.5">
+    ${[1, 2, 3, 4, 5].map(
+      (n) => html`<button
+        hx-post="/${kind}/${id}/rating"
+        hx-vals="${`{"value": ${n === r ? 0 : n}}`}"
+        hx-target="closest .stars"
+        hx-swap="outerHTML"
+        class="leading-none ${n <= r ? "text-amber-500" : "text-slate-300"} hover:text-amber-400"
+        aria-label="${n} stars"
+      >★</button>`,
+    )}
+  </span>`;
+}
+
+/** Favorite toggle for a track. */
+export function favBtn(id: number, on: boolean) {
+  return html`<button
+    hx-post="/track/${id}/favorite"
+    hx-target="this"
+    hx-swap="outerHTML"
+    class="leading-none ${on ? "text-rose-500" : "text-slate-300"} hover:text-rose-400"
+    title="Favorite"
+  >♥</button>`;
+}
+
 const STAT_LABELS: [keyof LibraryStats, string][] = [
   ["tracks", "tracks"],
   ["artists", "artists"],
@@ -81,7 +109,10 @@ export function dashboard(stats: LibraryStats, recent: RecentLink[]) {
         <h1 class="text-3xl font-bold tracking-tight">Your library</h1>
         <p class="text-slate-500 mt-1">Save music &amp; books by link — Spotify, YouTube, Bandcamp, Goodreads.</p>
       </div>
-      <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-10">${cards}</div>
+      <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-3">${cards}</div>
+      ${stats.pending > 0
+        ? html`<p class="text-xs text-amber-600 mb-8">⏳ ${stats.pending} item${stats.pending === 1 ? "" : "s"} enriching in the background…</p>`
+        : html`<div class="mb-8"></div>`}
       <div class="bg-white border border-slate-200 rounded-xl p-5">
         <div class="flex items-center justify-between mb-2">
           <h2 class="font-semibold">Recently saved</h2>
@@ -151,19 +182,56 @@ export function booksPage(books: BookRow[]) {
     ? html`<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
         ${books.map(
           (b) => html`
-            <div class="bg-white border border-slate-200 rounded-xl p-3">
+            <a href="/book/${b.id}" class="block bg-white border border-slate-200 rounded-xl p-3 hover:border-slate-300">
               ${mediaSrc(b.cover_key, b.cover_url)
                 ? html`<img src="${mediaSrc(b.cover_key, b.cover_url)}" alt="" class="w-full aspect-[2/3] rounded-lg object-cover mb-2 bg-slate-100" />`
                 : html`<div class="w-full aspect-[2/3] rounded-lg bg-slate-100 mb-2 flex items-center justify-center text-slate-300 text-2xl">📖</div>`}
               <div class="text-sm font-medium leading-tight line-clamp-2">${b.title}</div>
               ${b.author ? html`<div class="text-xs text-slate-500 truncate">${b.author}</div>` : ""}
               ${b.reading_status ? html`<div class="text-[11px] text-emerald-600 mt-1">${STATUS_LABEL[b.reading_status] ?? b.reading_status}</div>` : ""}
-            </div>
+            </a>
           `,
         )}
       </div>`
     : html`<p class="text-slate-500 text-sm">No books yet. Send a Goodreads link to the bot or use <a class="underline" href="/add">Add</a>.</p>`;
   return layout("Books · medialib", html`<h1 class="text-2xl font-bold tracking-tight mb-6">Books</h1>${body}`);
+}
+
+export function bookPage(b: BookDetail) {
+  const cover = mediaSrc(b.cover_key, b.cover_url);
+  const statusOpt = (v: string, label: string) =>
+    html`<option value="${v}" ${b.reading_status === v ? "selected" : ""}>${label}</option>`;
+  const meta = [b.author, b.year, b.page_count ? `${b.page_count} pp` : null, b.publisher]
+    .filter(Boolean)
+    .join(" · ");
+  return layout(
+    `${b.title} · medialib`,
+    html`
+      <a href="/books" class="text-sm text-slate-500 hover:underline">← Books</a>
+      <div class="flex flex-col sm:flex-row gap-6 mt-3">
+        <div class="shrink-0 w-40">
+          ${cover
+            ? html`<img src="${cover}" alt="" class="w-40 rounded-xl object-cover bg-slate-100" />`
+            : html`<div class="w-40 aspect-[2/3] rounded-xl bg-slate-100 flex items-center justify-center text-slate-300 text-3xl">📖</div>`}
+        </div>
+        <div class="min-w-0 flex-1">
+          <h1 class="text-2xl font-bold tracking-tight">${b.title}</h1>
+          ${meta ? html`<p class="text-sm text-slate-500 mt-1">${meta}</p>` : ""}
+          <div class="flex items-center gap-4 mt-4">
+            <label class="text-sm text-slate-600">Status
+              <select name="status" hx-post="/book/${b.id}/status" hx-trigger="change" hx-swap="none"
+                class="ml-2 border border-slate-200 rounded-lg px-2 py-1 text-sm">
+                ${statusOpt("want", "Want to read")}${statusOpt("reading", "Reading")}${statusOpt("read", "Read")}
+              </select>
+            </label>
+            <span class="text-sm text-slate-600 flex items-center gap-2">Rating ${stars("book", b.id, b.rating)}</span>
+          </div>
+          ${b.description ? html`<p class="text-sm text-slate-600 mt-5 leading-relaxed">${b.description}</p>` : ""}
+          ${b.isbn ? html`<p class="text-xs text-slate-400 mt-4">ISBN ${b.isbn}</p>` : ""}
+        </div>
+      </div>
+    `,
+  );
 }
 
 export function artistPage(detail: ArtistDetail) {
@@ -190,8 +258,11 @@ export function artistPage(detail: ArtistDetail) {
                     ${mediaSrc(al.cover_key, al.cover_url)
                       ? html`<img src="${mediaSrc(al.cover_key, al.cover_url)}" alt="" class="w-full aspect-square rounded-lg object-cover mb-2 bg-slate-100" />`
                       : html`<div class="w-full aspect-square rounded-lg bg-slate-100 mb-2"></div>`}
-                    <div class="text-sm font-medium truncate">${String(al.title)}</div>
-                    ${al.year ? html`<div class="text-xs text-slate-400">${String(al.year)}</div>` : ""}
+                    <div class="text-sm font-medium truncate">${al.title}</div>
+                    <div class="flex items-center justify-between">
+                      ${al.year ? html`<span class="text-xs text-slate-400">${al.year}</span>` : html`<span></span>`}
+                      ${stars("album", al.id, al.rating)}
+                    </div>
                   </div>
                 `,
               )}
@@ -203,9 +274,13 @@ export function artistPage(detail: ArtistDetail) {
               ${tracks.map(
                 (t) => html`
                   <div class="flex items-center justify-between gap-3 px-4 py-2">
-                    <span class="min-w-0"><span class="block text-sm truncate">${String(t.title)}</span>
-                      ${t.album ? html`<span class="block text-xs text-slate-400 truncate">${String(t.album)}</span>` : ""}</span>
-                    <span class="text-xs text-slate-400 tabular-nums">${fmtDuration(t.duration_ms)}</span>
+                    <span class="min-w-0"><span class="block text-sm truncate">${t.title}</span>
+                      ${t.album ? html`<span class="block text-xs text-slate-400 truncate">${t.album}</span>` : ""}</span>
+                    <span class="flex items-center gap-3 shrink-0">
+                      ${stars("track", t.id, t.rating)}
+                      ${favBtn(t.id, !!t.favorite)}
+                      <span class="text-xs text-slate-400 tabular-nums w-9 text-right">${fmtDuration(t.duration_ms)}</span>
+                    </span>
                   </div>
                 `,
               )}

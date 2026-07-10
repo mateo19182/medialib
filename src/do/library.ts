@@ -50,6 +50,7 @@ export interface AlbumRow {
   year: number | null;
   cover_url: string | null;
   cover_key: string | null;
+  rating: number | null;
 }
 
 export interface TrackRow {
@@ -57,7 +58,28 @@ export interface TrackRow {
   title: string;
   duration_ms: number | null;
   album: string | null;
+  rating: number | null;
+  favorite: number;
 }
+
+export interface BookDetail {
+  id: number;
+  title: string;
+  author: string | null;
+  cover_url: string | null;
+  cover_key: string | null;
+  year: number | null;
+  publisher: string | null;
+  page_count: number | null;
+  isbn: string | null;
+  description: string | null;
+  reading_status: string | null;
+  rating: number | null;
+}
+
+export type RatableKind = "track" | "album" | "book";
+export const READING_STATUSES = ["want", "reading", "read"] as const;
+export type ReadingStatus = (typeof READING_STATUSES)[number];
 
 export interface ArtistDetail {
   artist: { id: number; name: string; image_url: string | null; image_key: string | null; genres: string | null };
@@ -123,6 +145,7 @@ export class Library extends DurableObject<Env> {
       albums: count("albums"),
       books: count("books"),
       links: count("links"),
+      pending: count("enrich_queue"),
     };
   }
 
@@ -156,17 +179,55 @@ export class Library extends DurableObject<Env> {
       | undefined;
     if (!artist) return null;
     const albums = this.sql
-      .exec("SELECT id, title, year, cover_url, cover_key FROM albums WHERE artist_id = ? ORDER BY year, title COLLATE NOCASE", id)
+      .exec("SELECT id, title, year, cover_url, cover_key, rating FROM albums WHERE artist_id = ? ORDER BY year, title COLLATE NOCASE", id)
       .toArray() as unknown as AlbumRow[];
     const tracks = this.sql
       .exec(
-        `SELECT t.id, t.title, t.duration_ms, al.title AS album
+        `SELECT t.id, t.title, t.duration_ms, t.rating, t.favorite, al.title AS album
          FROM tracks t LEFT JOIN albums al ON al.id = t.album_id
          WHERE t.artist_id = ? ORDER BY t.title COLLATE NOCASE`,
         id,
       )
       .toArray() as unknown as TrackRow[];
     return { artist, albums, tracks };
+  }
+
+  /** Full book record with joined authors for the detail page. */
+  bookDetail(id: number): BookDetail | null {
+    return (
+      (this.sql
+        .exec(
+          `SELECT b.id, b.title, b.cover_url, b.cover_key, b.year, b.publisher, b.page_count, b.isbn,
+                  b.description, b.reading_status, b.rating,
+                  (SELECT group_concat(a.name, ', ') FROM book_authors ba JOIN authors a ON a.id = ba.author_id WHERE ba.book_id = b.id) AS author
+           FROM books b WHERE b.id = ?`,
+          id,
+        )
+        .toArray()[0] as unknown as BookDetail | undefined) ?? null
+    );
+  }
+
+  // --- ratings / status ----------------------------------------------------
+
+  /** Set a 1–5 rating (0 clears it) on a track, album, or book. */
+  rate(kind: RatableKind, id: number, rating: number): number {
+    const table = { track: "tracks", album: "albums", book: "books" }[kind];
+    const v = Math.max(0, Math.min(5, Math.round(rating)));
+    this.sql.exec(`UPDATE ${table} SET rating = ? WHERE id = ?`, v || null, id);
+    return v;
+  }
+
+  setReadingStatus(id: number, status: ReadingStatus): void {
+    this.sql.exec("UPDATE books SET reading_status = ? WHERE id = ?", status, id);
+  }
+
+  toggleFavorite(trackId: number): boolean {
+    const row = this.sql.exec("SELECT favorite FROM tracks WHERE id = ?", trackId).toArray()[0] as
+      | { favorite: number }
+      | undefined;
+    const next = row && Number(row.favorite) ? 0 : 1;
+    this.sql.exec("UPDATE tracks SET favorite = ? WHERE id = ?", next, trackId);
+    return next === 1;
   }
 
   /** All books with their primary author, for /books. */

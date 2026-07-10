@@ -1,5 +1,6 @@
 import type { Env } from "../types";
 import { getLibrary } from "../types";
+import { READING_STATUSES, type RatableKind, type ReadingStatus } from "../do/library";
 
 // --- minimal Telegram types -------------------------------------------------
 interface TgUser {
@@ -62,6 +63,9 @@ const HELP = [
   "/search &lt;query&gt; — find saved items",
   "/recent — recently saved",
   "/stats — library counts",
+  "/rate track|album|book &lt;id&gt; &lt;0-5&gt; — rate an item",
+  "/status &lt;bookId&gt; want|reading|read — set reading status",
+  "/fav &lt;trackId&gt; — toggle favorite",
 ].join("\n");
 
 // --- routing ----------------------------------------------------------------
@@ -121,6 +125,26 @@ async function handleCommand(cmd: string, args: string, chatId: number, env: Env
       if (!hits.length) return send(env, chatId, `No matches for “${escapeHtml(args)}”.`);
       const lines = hits.map((h) => `• ${h.type}: <b>${escapeHtml(h.name)}</b>${h.sub ? ` — ${escapeHtml(h.sub)}` : ""}`);
       return send(env, chatId, lines.join("\n"));
+    }
+    case "rate": {
+      const [kind, idStr, valStr] = args.split(/\s+/);
+      if (!["track", "album", "book"].includes(kind) || !idStr || valStr === undefined)
+        return send(env, chatId, "Usage: /rate track|album|book &lt;id&gt; &lt;0-5&gt;");
+      const v = await lib.rate(kind as RatableKind, Number(idStr), Number(valStr));
+      return send(env, chatId, `Rated ${kind} ${idStr}: ${"★".repeat(v)}${"☆".repeat(5 - v)}`);
+    }
+    case "status": {
+      const [idStr, status] = args.split(/\s+/);
+      if (!idStr || !READING_STATUSES.includes(status as ReadingStatus))
+        return send(env, chatId, "Usage: /status &lt;bookId&gt; want|reading|read");
+      await lib.setReadingStatus(Number(idStr), status as ReadingStatus);
+      return send(env, chatId, `Book ${idStr} → ${status}`);
+    }
+    case "fav": {
+      const id = Number(args.trim());
+      if (!id) return send(env, chatId, "Usage: /fav &lt;trackId&gt;");
+      const on = await lib.toggleFavorite(id);
+      return send(env, chatId, on ? `♥ Favorited track ${id}` : `Removed favorite from track ${id}`);
     }
     default:
       return send(env, chatId, "Unknown command. /help");
