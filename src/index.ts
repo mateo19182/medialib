@@ -88,6 +88,26 @@ app.post("/book/:id/status", async (c) => {
   return c.body(null, 204);
 });
 
+// --- Admin: bulk import (legacy catalog migration; behind Cloudflare Access) ---
+app.post("/admin/import", async (c) => {
+  const lib = getLibrary(c.env);
+  const payload = (await c.req.json()) as Parameters<typeof lib.importChunk>[0];
+  const result = await lib.importChunk(payload);
+  return c.json(result);
+});
+
+// Bulk import from a JSON dump stored in R2 (used for the legacy catalog
+// migration): the data loads from object storage rather than a request body.
+app.post("/admin/import-r2", async (c) => {
+  const key = c.req.query("key") ?? "import/dump.json";
+  const obj = await c.env.MEDIA.get(key);
+  if (!obj) return c.json({ error: `no R2 object at ${key}` }, 404);
+  const lib = getLibrary(c.env);
+  const payload = JSON.parse(await obj.text()) as Parameters<typeof lib.importChunk>[0];
+  const result = await lib.importChunk(payload);
+  return c.json(result);
+});
+
 // --- Telegram bot ---
 // NOTE: exclude /telegram/webhook from Cloudflare Access — Telegram can't
 // authenticate through it. The webhook is guarded by its own secret_token.

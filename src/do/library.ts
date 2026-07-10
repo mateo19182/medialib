@@ -351,6 +351,47 @@ export class Library extends DurableObject<Env> {
     return { ok: true, linkId, status, entityType, title, error };
   }
 
+  // --- bulk import (migration from the legacy SQLite catalog) --------------
+
+  resetCatalog(): void {
+    for (const t of ["track_artists", "tracks", "albums", "artists", "links", "enrich_queue"]) {
+      this.sql.exec(`DELETE FROM ${t}`);
+    }
+  }
+
+  /**
+   * Bulk-insert legacy catalog rows (ids preserved so FKs line up). Per-row
+   * try/catch so one bad row can't abort a batch. Does NOT enqueue enrichment
+   * (legacy rows already carry mbid/cover_url where available).
+   */
+  importChunk(p: {
+    reset?: boolean;
+    artists?: { id: number; name: string; normalized_name: string; mbid?: string | null; image_url?: string | null; genres?: string | null }[];
+    albums?: { id: number; title: string; normalized_title: string; artist_id?: number | null; mbid?: string | null; cover_url?: string | null; year?: number | null }[];
+    tracks?: { id: number; title: string; normalized_title: string; artist_id?: number | null; album_id?: number | null; duration_ms?: number | null; isrc?: string | null; mbid?: string | null }[];
+    trackArtists?: { track_id: number; artist_id: number; position?: number; role?: string }[];
+  }): { artists: number; albums: number; tracks: number; trackArtists: number; failed: number } {
+    if (p.reset) this.resetCatalog();
+    const c = { artists: 0, albums: 0, tracks: 0, trackArtists: 0, failed: 0 };
+    const run = (fn: () => void, key: "artists" | "albums" | "tracks" | "trackArtists") => {
+      try {
+        fn();
+        c[key]++;
+      } catch {
+        c.failed++;
+      }
+    };
+    for (const a of p.artists ?? [])
+      run(() => this.sql.exec("INSERT OR REPLACE INTO artists (id, name, normalized_name, mbid, image_url, genres) VALUES (?, ?, ?, ?, ?, ?)", a.id, a.name, a.normalized_name, a.mbid ?? null, a.image_url ?? null, a.genres ?? null), "artists");
+    for (const al of p.albums ?? [])
+      run(() => this.sql.exec("INSERT OR REPLACE INTO albums (id, title, normalized_title, artist_id, mbid, cover_url, year) VALUES (?, ?, ?, ?, ?, ?, ?)", al.id, al.title, al.normalized_title, al.artist_id ?? null, al.mbid ?? null, al.cover_url ?? null, al.year ?? null), "albums");
+    for (const t of p.tracks ?? [])
+      run(() => this.sql.exec("INSERT OR REPLACE INTO tracks (id, title, normalized_title, artist_id, album_id, duration_ms, isrc, mbid) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", t.id, t.title, t.normalized_title, t.artist_id ?? null, t.album_id ?? null, t.duration_ms ?? null, t.isrc ?? null, t.mbid ?? null), "tracks");
+    for (const ta of p.trackArtists ?? [])
+      run(() => this.sql.exec("INSERT OR REPLACE INTO track_artists (track_id, artist_id, position, role) VALUES (?, ?, ?, ?)", ta.track_id, ta.artist_id, ta.position ?? 0, ta.role ?? "main"), "trackArtists");
+    return c;
+  }
+
   // --- background enrichment (alarm-driven) --------------------------------
 
   private enqueueEnrich(entityType: string, entityId: number): void {
