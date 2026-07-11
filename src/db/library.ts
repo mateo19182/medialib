@@ -33,6 +33,7 @@ export interface SaveResult {
 export interface CompoundArtistRepairResult {
   processed: number;
   repaired: number;
+  skipped: number;
   failed: number;
 }
 
@@ -920,7 +921,7 @@ export class LibraryDb {
        LIMIT ?`,
       [Math.max(1, Math.min(500, Math.floor(limit)))],
     );
-    const result = { processed: 0, repaired: 0, failed: 0 };
+    const result = { processed: 0, repaired: 0, skipped: 0, failed: 0 };
 
     for (const artist of candidates) {
       result.processed++;
@@ -958,6 +959,16 @@ export class LibraryDb {
 
         await this.run("UPDATE OR IGNORE albums SET artist_id = ? WHERE artist_id = ?", [primaryId, artist.id]);
         await this.run("UPDATE OR IGNORE tracks SET artist_id = ? WHERE artist_id = ?", [primaryId, artist.id]);
+        const remaining = await this.first<{ albums: number; tracks: number }>(
+          `SELECT
+             (SELECT COUNT(*) FROM albums WHERE artist_id = ?) AS albums,
+             (SELECT COUNT(*) FROM tracks WHERE artist_id = ?) AS tracks`,
+          [artist.id, artist.id],
+        );
+        if (Number(remaining?.albums ?? 0) || Number(remaining?.tracks ?? 0)) {
+          result.skipped++;
+          continue;
+        }
         await this.run("UPDATE links SET entity_id = ? WHERE entity_type = 'artist' AND entity_id = ?", [primaryId, artist.id]);
         await this.run("DELETE FROM track_artists WHERE artist_id = ?", [artist.id]);
         await this.run("DELETE FROM external_ids WHERE entity_type = 'artist' AND entity_id = ?", [artist.id]);

@@ -76,7 +76,7 @@ describe("Library DB", () => {
       env.DB.prepare("INSERT INTO enrich_queue (entity_type, entity_id) VALUES ('artist', 1301)"),
     ]);
 
-    expect(await lib.repairCompoundArtists(50)).toMatchObject({ repaired: 1, failed: 0 });
+    expect(await lib.repairCompoundArtists(50)).toMatchObject({ repaired: 1, skipped: 0, failed: 0 });
 
     const artists = await lib.listArtists(1000, 0);
     expect(artists.items.some((a) => a.name === "Repair Alpha, Repair Beta")).toBe(false);
