@@ -3,21 +3,28 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@10.12.1",
   "scripts": {
+    "build:assets": "tailwindcss -i src/web/styles.css -o public/assets/app.css --minify && cp node_modules/htmx.org/dist/htmx.min.js public/assets/htmx.min.js",
+    "predev": "pnpm build:assets",
     "dev": "wrangler dev",
+    "predeploy": "pnpm build:assets",
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "cf-typegen": "wrangler types"
   },
   "dependencies": {
-    "hono": "^4.6.14"
+    "hono": "^4.6.14",
+    "htmx.org": "^2.0.10"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.8.14",
-    "@cloudflare/workers-types": "^4.20250408.0",
+    "@cloudflare/vitest-pool-workers": "^0.18.4",
+    "@tailwindcss/cli": "^4.1.11",
+    "@types/node": "^26.1.1",
+    "tailwindcss": "^4.1.11",
     "typescript": "^5.7.2",
-    "vitest": "3.0.9",
-    "wrangler": "4.9.1"
+    "vitest": "4.1.10",
+    "wrangler": "4.110.0"
   }
 }

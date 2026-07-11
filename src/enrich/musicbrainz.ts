@@ -1,7 +1,7 @@
 /**
  * MusicBrainz lookups for canonical IDs + genres, and Cover Art Archive URLs.
- * MusicBrainz asks for a descriptive User-Agent and ~1 req/s; the DO's alarm
- * loop enforces the rate limit by doing one entity per tick.
+ * MusicBrainz asks for a descriptive User-Agent and ~1 req/s; scheduled
+ * enrichment keeps batches small.
  */
 const MB = "https://musicbrainz.org/ws/2";
 const UA = "medialib/0.1 (https://github.com/mateo19182/medialib)";

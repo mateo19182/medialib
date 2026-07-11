@@ -35,10 +35,10 @@ your music to YouTube Music.
 |---|---|---|
 | Runtime | **Workers** (TypeScript) | Serverless, scale-to-zero, `wrangler` deploys. |
 | HTTP / routing | **Hono** | Tiny, Workers-native router + middleware + JSX. |
-| Storage + coordination | **one Durable Object** with embedded **SQLite** | Single-user → one object owns the whole catalog. Strong consistency, single writer, no D1 binding indirection. Holds the DB *and* runs background jobs via alarms. |
-| ORM / migrations | **Drizzle** (SQLite dialect) | Typed schema + migrations against DO SQLite. |
+| Storage | **D1** (SQLite) | Single-user catalog with managed migrations and direct Worker access. |
+| Migrations | **Wrangler D1 migrations** | Schema changes live in versioned SQL files. |
 | File cache | **R2** | Cover art + EPUBs, so the library survives source link-rot. |
-| Background work | **DO alarms** (v1); **Queues/Workflows** if needed | Chunked, resumable enrichment + migration; respects rate limits. |
+| Background work | **Cron trigger** (v1); **Queues/Workflows** if needed | Chunked, resumable enrichment + migration; respects rate limits. |
 | Web auth | **Cloudflare Access** (SSO) | No app-level login code; you only. |
 | Bot auth | Telegram user-ID allowlist + webhook secret | Bot ignores everyone but you. |
 | HTML parsing | **HTMLRewriter** (native) + JSON-LD extraction | Scrape Bandcamp/Goodreads/Spotify pages without a DOM lib. |
@@ -49,20 +49,19 @@ your music to YouTube Music.
 
 ```
 Telegram ──webhook──▶ Worker (Hono)
-Browser ──CF Access─▶ Worker (Hono)  ─── RPC ───▶  Durable Object "Library"
-                         │                            ├── SQLite (catalog, links, jobs)
-                         │                            └── alarm loop (enrich / migrate)
+Browser ──CF Access─▶ Worker (Hono)  ───▶  D1 (catalog, links, jobs)
+                         │
                          └── R2 (covers, epubs)
 External: Spotify oEmbed+API · YouTube Data API · Bandcamp/Goodreads pages · MusicBrainz · OpenLibrary · Cover Art Archive · Google OAuth (migration)
 ```
 
-The Worker is stateless glue; **all state lives in the one Durable Object**. The DO exposes
-RPC methods (`saveLink`, `search`, `recent`, `stats`, `startMigration`, job status) and drives
-its own alarm-based job loop.
+The Worker is stateless glue; catalog state lives in D1. The library service exposes
+methods (`saveLink`, `search`, `recent`, `stats`, `importChunk`) and scheduled events drain
+enrichment work in small batches.
 
 ---
 
-## 3. Data model (SQLite inside the DO)
+## 3. Data model (D1 SQLite)
 
 Relational music model (browsable) + separate books, unified by a `links` table.
 
@@ -102,7 +101,7 @@ individual `artists` + `track_artists` roles (main/featured), same idea as the o
    - `youtube.com/watch`, `youtu.be/…`, `music.youtube.com/…`, `…/playlist?list=`
    - `*.bandcamp.com/(track|album)/…`
    - `goodreads.com/book/show/…`
-2. **Fast ack** (bot only) — reply “Saved ✓ enriching…”, insert a `links` row + minimal stub, enqueue enrichment (set DO alarm). Never block the Telegram webhook on network fetches.
+2. **Fast ack** (bot only) — reply “Saved ✓ enriching…”, insert a `links` row + minimal stub, enqueue enrichment. Never block the Telegram webhook on network fetches.
 3. **Fetch base metadata** (per-source, §5).
 4. **Enrich** — music → MusicBrainz (by ISRC or title+artist) for MBIDs/genres/tracklist + Cover Art Archive; books → OpenLibrary (by ISBN) for cover/description/pages.
 5. **Cache art** — download cover (and EPUB if provided) → R2, store `*_key`.
@@ -157,7 +156,7 @@ small HTMX `POST`s.
 - **Run**: create a playlist (`playlists.insert`) → for each saved track, `search.list` for the
   best video → `playlistItems.insert`. Progress tracked in `migration_state` + a `jobs` row.
 - **Quota reality**: default 10 000 units/day; `search.list` = 100, `playlistItems.insert` = 50
-  → ~**90 tracks/day**. So migration is **chunked across days via DO alarms**, resuming from
+  → ~**90 tracks/day**. So migration is **chunked across days via scheduled batches**, resuming from
   `cursor`. UI/bot shows “added X, N remaining, resumes tomorrow.” (Flagged as the main
   operational constraint; requesting a quota increase is optional.)
 
@@ -166,11 +165,11 @@ small HTMX `POST`s.
 ## 9. Background jobs & async model
 
 - Telegram webhook and web requests **never block** on enrichment/migration.
-- The DO holds a work queue in SQLite and an **alarm loop**: on alarm, do a bounded batch
-  (respecting MusicBrainz ~1 req/s and YT quota), persist progress, re-arm the alarm if work
-  remains. Resumable across deploys/restarts — unlike the old daemon threads.
+- D1 holds a work queue; scheduled events do bounded batches (respecting MusicBrainz ~1 req/s
+  and YT quota) and persist progress. Resumable across deploys/restarts — unlike the old
+  daemon threads.
 - If retry-durability or fan-out grows, promote enrichment to **Cloudflare Workflows** and/or
-  ingestion to **Queues** (drop-in; the DO stays the store of record).
+  ingestion to **Queues** while D1 stays the store of record.
 
 ---
 
@@ -178,8 +177,8 @@ small HTMX `POST`s.
 
 `wrangler secret put` for: `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USER_ID`,
 `TELEGRAM_WEBHOOK_SECRET`, `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, `YOUTUBE_API_KEY`,
-`GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`. Bindings in `wrangler.jsonc`: DO
-namespace, R2 bucket. CF Access policy protects all web routes except the Telegram webhook.
+`GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`. Bindings in `wrangler.jsonc`: D1
+database, R2 bucket. CF Access policy protects all web routes except the Telegram webhook.
 
 ---
 
@@ -188,8 +187,8 @@ namespace, R2 bucket. CF Access policy protects all web routes except the Telegr
 ```
 src/
   index.ts                 # Hono app, route mounting, CF Access assumed
-  do/library.ts            # Durable Object: RPC + SQLite + alarm loop
-  db/schema.ts             # Drizzle schema + migrations
+  db/library.ts            # D1 catalog service
+  migrations/              # D1 schema migrations
   ingest/
     classify.ts            # URL → {source, kind}
     spotify.ts youtube.ts bandcamp.ts goodreads.ts
@@ -206,11 +205,11 @@ wrangler.jsonc  drizzle.config.ts  vitest.config.ts
 
 ## 12. Milestones
 
-- **M0 — Scaffold**: wrangler + Hono + DO(SQLite) + Drizzle migrations + R2 + CF Access; deploy “hello”.
-- **M1 — Ingestion core**: classifier + Spotify(oEmbed) + YouTube(API) fetchers → DO storage + dedupe; basic `/library` + `/add`.
+- **M0 — Scaffold**: wrangler + Hono + D1 migrations + R2 + CF Access; deploy “hello”.
+- **M1 — Ingestion core**: classifier + Spotify(oEmbed) + YouTube(API) fetchers → D1 storage + dedupe; basic `/library` + `/add`.
 - **M2 — Telegram bot**: secure webhook, ack+enqueue, follow-up confirm, `/search /recent /stats`.
 - **M3 — Bandcamp + Goodreads** scrapers (HTMLRewriter/JSON-LD).
-- **M4 — Enrichment + R2**: MusicBrainz + OpenLibrary + Cover Art via alarm loop; cache covers/EPUBs.
+- **M4 — Enrichment + R2**: MusicBrainz + OpenLibrary + Cover Art via scheduled batches; cache covers/EPUBs.
 - **M5 — Status & ratings**: fields + UI + bot commands.
 - **M6 — YouTube migration**: OAuth, playlist build, quota-aware chunked resume.
 - **M7 — Polish**: dashboard stats, error surfacing, retry hardening, tests.

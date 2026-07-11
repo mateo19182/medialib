@@ -4,6 +4,7 @@ import { parseSpotify } from "../src/ingest/spotify";
 import { videoToTrack } from "../src/ingest/youtube";
 import { parseBandcamp } from "../src/ingest/bandcamp";
 import { parseGoodreads } from "../src/ingest/goodreads";
+import { parseMyAnimeList } from "../src/ingest/myanimelist";
 import { splitArtists, normalize, iso8601ToMs } from "../src/util";
 
 describe("classify", () => {
@@ -32,6 +33,21 @@ describe("classify", () => {
   it("recognizes Bandcamp and Goodreads", () => {
     expect(classify("https://artist.bandcamp.com/album/cool-record")).toMatchObject({ source: "bandcamp", kind: "album" });
     expect(classify("https://www.goodreads.com/book/show/12345.The_Book")).toMatchObject({ source: "goodreads", kind: "book", sourceId: "12345" });
+  });
+
+  it("recognizes MyAnimeList anime and manga", () => {
+    expect(classify("https://myanimelist.net/anime/5114/Fullmetal_Alchemist_Brotherhood")).toMatchObject({
+      source: "myanimelist",
+      kind: "anime",
+      sourceId: "5114",
+      url: "https://myanimelist.net/anime/5114",
+    });
+    expect(classify("https://myanimelist.net/manga.php?id=2")).toMatchObject({
+      source: "myanimelist",
+      kind: "manga",
+      sourceId: "2",
+      url: "https://myanimelist.net/manga/2",
+    });
   });
 
   it("rejects unknown urls", () => {
@@ -134,6 +150,50 @@ describe("parseGoodreads", () => {
       pageCount: 319,
       description: "A book about habits.",
       coverUrl: "https://m.media-amazon.com/x.jpg",
+    });
+  });
+});
+
+describe("parseMyAnimeList", () => {
+  it("parses anime metadata from og tags", () => {
+    expect(
+      parseMyAnimeList(
+        null,
+        {
+          "og:title": "Fullmetal Alchemist: Brotherhood - MyAnimeList.net",
+          "og:description": "Looking for information on the anime Fullmetal Alchemist: Brotherhood (2009)?",
+          "og:image": "https://cdn.myanimelist.net/images/anime/1208/94745.jpg",
+        },
+        "anime",
+      ),
+    ).toEqual({
+      entityType: "media",
+      kind: "anime",
+      title: "Fullmetal Alchemist: Brotherhood",
+      year: 2009,
+      description: "Looking for information on the anime Fullmetal Alchemist: Brotherhood (2009)?",
+      coverUrl: "https://cdn.myanimelist.net/images/anime/1208/94745.jpg",
+    });
+  });
+
+  it("parses manga metadata from JSON-LD", () => {
+    expect(
+      parseMyAnimeList(
+        {
+          "@type": "Book",
+          name: "Berserk",
+          datePublished: "1989-08-25",
+          image: { url: "https://cdn.myanimelist.net/images/manga/1/157897.jpg" },
+        },
+        {},
+        "manga",
+      ),
+    ).toMatchObject({
+      entityType: "media",
+      kind: "manga",
+      title: "Berserk",
+      year: 1989,
+      coverUrl: "https://cdn.myanimelist.net/images/manga/1/157897.jpg",
     });
   });
 });

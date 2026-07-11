@@ -54,6 +54,18 @@ export function classify(rawUrl: string): Classified | null {
     return null;
   }
 
+  // --- MyAnimeList ---
+  if (host === "myanimelist.net") {
+    const m = path.match(/^\/(anime|manga)\/(\d+)(?:\/|$)/);
+    if (m) return { source: "myanimelist", kind: m[1] as Classified["kind"], sourceId: m[2], url: `https://myanimelist.net/${m[1]}/${m[2]}` };
+    const legacy = path.match(/^\/(anime|manga)\.php$/);
+    const id = url.searchParams.get("id");
+    if (legacy && id && /^\d+$/.test(id)) {
+      return { source: "myanimelist", kind: legacy[1] as Classified["kind"], sourceId: id, url: `https://myanimelist.net/${legacy[1]}/${id}` };
+    }
+    return null;
+  }
+
   return null;
 }
 

@@ -1,6 +1,7 @@
 import type { Env } from "../types";
 import { getLibrary } from "../types";
-import { READING_STATUSES, type RatableKind, type ReadingStatus } from "../do/library";
+import { READING_STATUSES, type RatableKind, type ReadingStatus } from "../db/library";
+import { isTextAddKind, type TextAddKind } from "../ingest/text";
 
 // --- minimal Telegram types -------------------------------------------------
 interface TgUser {
@@ -18,7 +19,9 @@ interface TgMessage {
 interface TgUpdate {
   message?: TgMessage;
   edited_message?: TgMessage;
+  callback_query?: TgCallbackQuery;
 }
+interface TgCallbackQuery { id: string; from: TgUser; data?: string; message?: TgMessage; }
 
 // --- pure helpers (unit-tested) --------------------------------------------
 const URL_RE = /https?:\/\/[^\s<>]+/g;
@@ -52,21 +55,35 @@ async function tgCall(env: Env, method: string, payload: unknown): Promise<void>
   }
 }
 
-function send(env: Env, chatId: number, text: string): Promise<void> {
-  return tgCall(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true });
+function send(env: Env, chatId: number, text: string, replyMarkup?: unknown): Promise<void> {
+  return tgCall(env, "sendMessage", { chat_id: chatId, text, parse_mode: "HTML", disable_web_page_preview: true, reply_markup: replyMarkup });
 }
 
 const HELP = [
-  "🎵 <b>medialib</b> — send me a Spotify, YouTube, Bandcamp, or Goodreads link and I'll save it.",
+  "🎵 <b>medialib</b> — send me a Spotify, YouTube, Bandcamp, Goodreads, or MyAnimeList link and I'll save it.",
   "",
   "Commands:",
+  "/add — add an item by name (choose its type first)",
   "/search &lt;query&gt; — find saved items",
   "/recent — recently saved",
   "/stats — library counts",
-  "/rate track|album|book &lt;id&gt; &lt;0-5&gt; — rate an item",
+  "/rate track|album|book|media &lt;id&gt; &lt;0-5&gt; — rate an item",
   "/status &lt;bookId&gt; want|reading|read — set reading status",
   "/fav &lt;trackId&gt; — toggle favorite",
 ].join("\n");
+
+const ADD_KINDS: { kind: TextAddKind; label: string }[] = [
+  { kind: "track", label: "🎵 Track" }, { kind: "album", label: "💿 Album" }, { kind: "artist", label: "🎤 Artist" }, { kind: "book", label: "📚 Book" },
+  { kind: "movie", label: "🎬 Movie" }, { kind: "series", label: "📺 Series" }, { kind: "anime", label: "✨ Anime" }, { kind: "manga", label: "📖 Manga" },
+];
+
+function addKeyboard(): { inline_keyboard: { text: string; callback_data: string }[][] } {
+  return { inline_keyboard: ADD_KINDS.reduce<{ text: string; callback_data: string }[][]>((rows, item, index) => {
+    if (index % 2 === 0) rows.push([]);
+    rows[rows.length - 1].push({ text: item.label, callback_data: `add:${item.kind}` });
+    return rows;
+  }, []) };
+}
 
 // --- routing ----------------------------------------------------------------
 async function handleMessage(msg: TgMessage, env: Env): Promise<void> {
@@ -81,6 +98,10 @@ async function handleMessage(msg: TgMessage, env: Env): Promise<void> {
 
   const urls = extractUrls(text);
   if (urls.length === 0) {
+    if (msg.from) {
+      const kind = await getLibrary(env).takeTelegramAddKind(chatId, msg.from.id);
+      if (kind) return saveText(kind, text, chatId, env);
+    }
     await send(env, chatId, "Send me a link, or /help.");
     return;
   }
@@ -99,6 +120,18 @@ async function handleMessage(msg: TgMessage, env: Env): Promise<void> {
   }
 }
 
+async function saveText(kind: TextAddKind, text: string, chatId: number, env: Env): Promise<void> {
+  try {
+    const r = await getLibrary(env).saveText(kind, text, "telegram");
+    if (r.duplicate) return send(env, chatId, `↩️ Already saved: <b>${escapeHtml(r.title ?? text)}</b>`);
+    if (!r.ok) return send(env, chatId, `⚠️ ${escapeHtml(r.error ?? "Could not save")}`);
+    if (r.status === "ok") return send(env, chatId, `✅ Saved <b>${escapeHtml(r.title ?? text)}</b> <i>(${escapeHtml(kind)})</i>`);
+    return send(env, chatId, `💾 Saved <b>${escapeHtml(r.title ?? text)}</b> <i>(${escapeHtml(kind)}, unverified)</i>`);
+  } catch (e) {
+    return send(env, chatId, `❌ Error: ${escapeHtml(e instanceof Error ? e.message : String(e))}`);
+  }
+}
+
 async function handleCommand(cmd: string, args: string, chatId: number, env: Env): Promise<void> {
   const lib = getLibrary(env);
   switch (cmd) {
@@ -110,8 +143,15 @@ async function handleCommand(cmd: string, args: string, chatId: number, env: Env
       return send(
         env,
         chatId,
-        `📊 <b>${s.tracks}</b> tracks · <b>${s.artists}</b> artists · <b>${s.albums}</b> albums · <b>${s.books}</b> books\n<b>${s.links}</b> saved links`,
+        `📊 <b>${s.tracks}</b> tracks · <b>${s.artists}</b> artists · <b>${s.albums}</b> albums · <b>${s.books}</b> books\n<b>${s.movies}</b> movies · <b>${s.series}</b> series · <b>${s.anime}</b> anime · <b>${s.manga}</b> manga\n<b>${s.links}</b> saved links`,
       );
+    }
+    case "add": {
+      if (args) {
+        const [kind, ...query] = args.split(/\s+/);
+        if (isTextAddKind(kind) && query.length) return saveText(kind, query.join(" "), chatId, env);
+      }
+      return send(env, chatId, "What would you like to add?", addKeyboard());
     }
     case "recent": {
       const rows = await lib.recent(10);
@@ -128,8 +168,8 @@ async function handleCommand(cmd: string, args: string, chatId: number, env: Env
     }
     case "rate": {
       const [kind, idStr, valStr] = args.split(/\s+/);
-      if (!["track", "album", "book"].includes(kind) || !idStr || valStr === undefined)
-        return send(env, chatId, "Usage: /rate track|album|book &lt;id&gt; &lt;0-5&gt;");
+      if (!["track", "album", "book", "media"].includes(kind) || !idStr || valStr === undefined)
+        return send(env, chatId, "Usage: /rate track|album|book|media &lt;id&gt; &lt;0-5&gt;");
       const v = await lib.rate(kind as RatableKind, Number(idStr), Number(valStr));
       return send(env, chatId, `Rated ${kind} ${idStr}: ${"★".repeat(v)}${"☆".repeat(5 - v)}`);
     }
@@ -149,6 +189,16 @@ async function handleCommand(cmd: string, args: string, chatId: number, env: Env
     default:
       return send(env, chatId, "Unknown command. /help");
   }
+}
+
+async function handleCallback(callback: TgCallbackQuery, env: Env): Promise<void> {
+  await tgCall(env, "answerCallbackQuery", { callback_query_id: callback.id });
+  const chatId = callback.message?.chat.id;
+  const kind = callback.data?.startsWith("add:") ? callback.data.slice(4) : "";
+  if (!chatId || !isTextAddKind(kind)) return;
+  await getLibrary(env).setTelegramAddKind(chatId, callback.from.id, kind);
+  const label = ADD_KINDS.find((item) => item.kind === kind)?.label ?? kind;
+  await send(env, chatId, `${label}: send me its title or name and I'll find the best match.`);
 }
 
 /**
@@ -177,6 +227,10 @@ export async function handleWebhook(
   if (msg && msg.from && (!allowed || String(msg.from.id) === allowed)) {
     ctx.waitUntil(handleMessage(msg, env).catch((e) => console.error("telegram handler error", e)));
   }
+  const callback = update.callback_query;
+  if (callback?.message && (!allowed || String(callback.from.id) === allowed)) {
+    ctx.waitUntil(handleCallback(callback, env).catch((e) => console.error("telegram callback error", e)));
+  }
   // Always 200 so Telegram stops retrying (ignored senders included).
   return new Response("ok");
 }
@@ -186,6 +240,6 @@ export async function registerWebhook(publicUrl: string, env: Env): Promise<void
   await tgCall(env, "setWebhook", {
     url: publicUrl,
     secret_token: env.TELEGRAM_WEBHOOK_SECRET || undefined,
-    allowed_updates: ["message", "edited_message"],
+    allowed_updates: ["message", "edited_message", "callback_query"],
   });
 }

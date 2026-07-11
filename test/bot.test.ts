@@ -1,6 +1,7 @@
 import { SELF } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
 import { extractUrls, parseCommand } from "../src/bot/telegram";
+import { isTextAddKind } from "../src/ingest/text";
 
 describe("bot helpers", () => {
   it("extracts urls from a message", () => {
@@ -17,9 +18,21 @@ describe("bot helpers", () => {
     expect(parseCommand("/help@medialib_bot")).toEqual({ cmd: "help", args: "" });
     expect(parseCommand("just text")).toBeNull();
   });
+
+  it("recognizes the media kinds offered by /add", () => {
+    expect(isTextAddKind("book")).toBe(true);
+    expect(isTextAddKind("series")).toBe(true);
+    expect(isTextAddKind("podcast")).toBe(false);
+  });
 });
 
 describe("webhook route", () => {
+  it("reports application processing time", async () => {
+    const res = await SELF.fetch("https://example.com/health");
+    expect(res.status).toBe(200);
+    expect(res.headers.get("server-timing")).toMatch(/^app;dur=\d+\.\d$/);
+  });
+
   it("returns 200 for an update (work happens in background)", async () => {
     const res = await SELF.fetch("https://example.com/telegram/webhook", {
       method: "POST",

@@ -2,23 +2,29 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "medialib",
   "main": "src/index.ts",
-  "compatibility_date": "2025-09-01",
+  "assets": { "directory": "./public" },
+  "compatibility_date": "2026-07-11",
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
-
   "routes": [{ "pattern": "medialib.m19182.dev", "custom_domain": true }],
   "workers_dev": false,
 
-  "durable_objects": {
-    "bindings": [{ "name": "LIBRARY", "class_name": "Library" }]
-  },
-  "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["Library"] }
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "medialib-db",
+      "database_id": "63a46658-90c7-4e93-b1cd-2948f948defd",
+      "migrations_dir": "migrations"
+    }
   ],
 
   "r2_buckets": [
     { "binding": "MEDIA", "bucket_name": "medialib-media" }
-  ]
+  ],
+
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  }
 
   // Secrets (set with `wrangler secret put NAME`, and in .dev.vars for local dev):
   //   TELEGRAM_BOT_TOKEN, TELEGRAM_ALLOWED_USER_ID, TELEGRAM_WEBHOOK_SECRET,

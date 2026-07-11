@@ -1,10 +1,7 @@
-import type { Library } from "./do/library";
+import { LibraryDb } from "./db/library";
 
-/** Worker + Durable Object bindings and secrets. */
-export interface Env {
-  LIBRARY: DurableObjectNamespace<Library>;
-  MEDIA: R2Bucket;
-
+/** Worker bindings and secrets. */
+export interface Env extends Cloudflare.Env {
   // Secrets (optional at type level; required at runtime for the features that use them)
   TELEGRAM_BOT_TOKEN?: string;
   TELEGRAM_ALLOWED_USER_ID?: string;
@@ -12,15 +9,13 @@ export interface Env {
   SPOTIFY_CLIENT_ID?: string;
   SPOTIFY_CLIENT_SECRET?: string;
   YOUTUBE_API_KEY?: string;
+  TMDB_API_TOKEN?: string;
   GOOGLE_OAUTH_CLIENT_ID?: string;
   GOOGLE_OAUTH_CLIENT_SECRET?: string;
 }
 
-/** There is exactly one library (single-user); route every request to it. */
-export const LIBRARY_INSTANCE = "library";
-
 export function getLibrary(env: Env) {
-  return env.LIBRARY.get(env.LIBRARY.idFromName(LIBRARY_INSTANCE));
+  return new LibraryDb(env);
 }
 
 export interface LibraryStats {
@@ -28,6 +23,10 @@ export interface LibraryStats {
   artists: number;
   albums: number;
   books: number;
+  movies: number;
+  series: number;
+  anime: number;
+  manga: number;
   links: number;
   pending: number;
 }

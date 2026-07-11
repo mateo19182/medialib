@@ -1,7 +1,25 @@
 import { html } from "hono/html";
 import type { HtmlEscapedString } from "hono/utils/html";
+import type { LiveShow } from "../live-shows";
 import type { LibraryStats } from "../types";
-import type { ArtistDetail, ArtistSummary, BookDetail, BookRow, RecentLink, SaveResult } from "../do/library";
+import type {
+  AlbumDetail,
+  AlbumRow,
+  ArtistDetail,
+  ArtistSummary,
+  BookDetail,
+  BookRow,
+  MediaDetail,
+  MediaRow,
+  PageResult,
+  SaveResult,
+  SearchResult,
+  TrackDetail,
+  TrackRow,
+} from "../db/library";
+import type { MediaKind } from "../ingest/types";
+
+export type MusicView = "artists" | "albums" | "tracks";
 
 function layout(title: string, body: HtmlEscapedString | Promise<HtmlEscapedString>) {
   return html`<!doctype html>
@@ -10,23 +28,33 @@ function layout(title: string, body: HtmlEscapedString | Promise<HtmlEscapedStri
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>${title}</title>
-        <script src="https://unpkg.com/htmx.org@2.0.4"></script>
-        <script src="https://cdn.tailwindcss.com"></script>
+        <link rel="stylesheet" href="/assets/app.css" />
+        <script src="/assets/htmx.min.js" defer></script>
       </head>
       <body class="bg-slate-50 text-slate-800 min-h-screen antialiased">
         <nav class="bg-slate-900 text-white sticky top-0 z-20">
-          <div class="max-w-5xl mx-auto px-6 h-14 flex items-center gap-8">
-            <a href="/" class="font-semibold tracking-tight flex items-center gap-2">
+          <div class="max-w-6xl mx-auto px-6 min-h-14 py-2 flex flex-wrap items-center gap-x-8 gap-y-2">
+            <a href="/" class="font-semibold tracking-tight flex items-center gap-2 shrink-0">
               <span class="inline-block w-2 h-2 rounded-full bg-emerald-400"></span>medialib
             </a>
-            <div class="flex gap-5 text-sm text-slate-300">
+            <div class="flex gap-5 text-sm text-slate-300 whitespace-nowrap">
               <a href="/library" class="hover:text-white">Music</a>
               <a href="/books" class="hover:text-white">Books</a>
+              <a href="/movies" class="hover:text-white">Movies</a>
+              <a href="/series" class="hover:text-white">Series</a>
+              <a href="/anime" class="hover:text-white">Anime</a>
+              <a href="/manga" class="hover:text-white">Manga</a>
+              <a href="/live" class="hover:text-white">Live</a>
+              <a href="https://links.m19182.dev" target="_blank" rel="noopener noreferrer" class="hover:text-white">Links</a>
               <a href="/add" class="hover:text-white">Add</a>
             </div>
+            <form action="/search" method="get" class="ml-auto flex min-w-48 flex-1 sm:flex-none sm:w-64">
+              <input name="q" type="search" placeholder="Search library"
+                class="w-full rounded-lg border border-white/10 bg-white/10 px-3 py-1.5 text-sm text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-400/40" />
+            </form>
           </div>
         </nav>
-        <main class="max-w-5xl mx-auto px-6 py-8">${body}</main>
+        <main class="max-w-6xl mx-auto px-6 py-8">${body}</main>
       </body>
     </html>`;
 }
@@ -43,8 +71,29 @@ function fmtDuration(ms: unknown): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 
+function mediaProgress(item: Pick<MediaRow, "progress_current" | "progress_total">): string {
+  if (!item.progress_current && !item.progress_total) return "";
+  if (item.progress_total) return `${item.progress_current ?? 0}/${item.progress_total}`;
+  return String(item.progress_current ?? "");
+}
+
+export const ARTIST_TYPE_LABELS: Record<string, string> = {
+  musician: "Musician",
+  visual_artist: "Visual artist",
+  filmmaker: "Filmmaker",
+  writer: "Writer",
+  performer: "Performer",
+  other: "Other",
+};
+
+function artistTypeSelect(value = "musician", classes = "border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white") {
+  return html`<select name="artistType" class="${classes}">
+    ${Object.entries(ARTIST_TYPE_LABELS).map(([key, label]) => html`<option value="${key}" ${value === key ? "selected" : ""}>${label}</option>`)}
+  </select>`;
+}
+
 /** Interactive 1–5 star rating (clicking the current value clears it). */
-export function stars(kind: "track" | "album" | "book", id: number, rating: number | null) {
+export function stars(kind: "track" | "album" | "book" | "media", id: number, rating: number | null) {
   const r = rating ?? 0;
   return html`<span class="stars inline-flex gap-0.5">
     ${[1, 2, 3, 4, 5].map(
@@ -58,6 +107,14 @@ export function stars(kind: "track" | "album" | "book", id: number, rating: numb
       >★</button>`,
     )}
   </span>`;
+}
+
+function musicHref(view: MusicView) {
+  return view === "artists" ? "/library" : `/library?view=${view}`;
+}
+
+function artistText(t: Pick<TrackRow, "artists" | "artist">): string {
+  return t.artists || t.artist || "Unknown artist";
 }
 
 /** Favorite toggle for a track. */
@@ -76,10 +133,13 @@ const STAT_LABELS: [keyof LibraryStats, string][] = [
   ["artists", "artists"],
   ["albums", "albums"],
   ["books", "books"],
-  ["links", "saved links"],
+  ["movies", "movies"],
+  ["series", "series"],
+  ["anime", "anime"],
+  ["manga", "manga"],
 ];
 
-export function dashboard(stats: LibraryStats, recent: RecentLink[]) {
+export function dashboard(stats: LibraryStats) {
   const cards = STAT_LABELS.map(
     ([k, label]) => html`
       <div class="bg-white border border-slate-200 rounded-xl p-5">
@@ -89,39 +149,32 @@ export function dashboard(stats: LibraryStats, recent: RecentLink[]) {
     `,
   );
 
-  const rows = recent.length
-    ? recent.map((r) => {
-        const label = String(r.title || r.url);
-        const badge = String(r.status) === "ok" ? "text-emerald-600" : String(r.status) === "error" ? "text-red-500" : "text-slate-400";
-        return html`
-          <a href="${String(r.url)}" target="_blank" rel="noopener" class="flex items-center justify-between gap-3 py-2 px-1 hover:bg-slate-50 rounded-lg">
-            <span class="min-w-0 flex-1 truncate text-sm">${label}</span>
-            <span class="text-xs whitespace-nowrap ${badge}">${String(r.source)} · ${String(r.status)}</span>
-          </a>
-        `;
-      })
-    : [html`<p class="text-sm text-slate-500">Nothing saved yet. Send a link to the bot or use <a class="underline" href="/add">Add</a>.</p>`];
-
   return layout(
     "medialib",
     html`
       <div class="mb-8">
         <h1 class="text-3xl font-bold tracking-tight">Your library</h1>
-        <p class="text-slate-500 mt-1">Save music &amp; books by link — Spotify, YouTube, Bandcamp, Goodreads.</p>
+        <p class="text-slate-500 mt-1">Save music, books, anime, and manga by link.</p>
       </div>
-      <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-3">${cards}</div>
+      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-3">${cards}</div>
       ${stats.pending > 0
         ? html`<p class="text-xs text-amber-600 mb-8">⏳ ${stats.pending} item${stats.pending === 1 ? "" : "s"} enriching in the background…</p>`
         : html`<div class="mb-8"></div>`}
-      <div class="bg-white border border-slate-200 rounded-xl p-5">
-        <div class="flex items-center justify-between mb-2">
-          <h2 class="font-semibold">Recently saved</h2>
-          <a href="/add" class="text-sm text-emerald-600 hover:underline">+ Add link</a>
-        </div>
-        <div class="divide-y divide-slate-100">${rows}</div>
-      </div>
+      <a href="https://links.m19182.dev" target="_blank" rel="noopener noreferrer" class="inline-flex text-sm font-medium text-emerald-700 hover:underline">Open Linkwarden</a>
     `,
   );
+}
+
+function pager(page: PageResult<unknown>, path: string) {
+  if (page.total <= page.limit) return "";
+  const current = Math.floor(page.offset / page.limit) + 1;
+  const pages = Math.ceil(page.total / page.limit);
+  const separator = path.includes("?") ? "&" : "?";
+  return html`<nav class="mt-6 flex items-center justify-between text-sm" aria-label="Pagination">
+    ${current > 1 ? html`<a class="text-emerald-700 hover:underline" href="${path}${separator}page=${current - 1}">Previous</a>` : html`<span></span>`}
+    <span class="text-slate-500">Page ${current} of ${pages} · ${page.total} items</span>
+    ${current < pages ? html`<a class="text-emerald-700 hover:underline" href="${path}${separator}page=${current + 1}">Next</a>` : html`<span></span>`}
+  </nav>`;
 }
 
 export function addPage(result?: SaveResult) {
@@ -141,27 +194,132 @@ export function addPage(result?: SaveResult) {
     "Add · medialib",
     html`
       <div class="max-w-xl">
-        <h1 class="text-2xl font-bold tracking-tight mb-1">Add by link</h1>
-        <p class="text-slate-500 text-sm mb-6">Paste a Spotify, YouTube, Bandcamp, or Goodreads link.</p>
+        <h1 class="text-2xl font-bold tracking-tight mb-1">Add to your library</h1>
+        <p class="text-slate-500 text-sm mb-6">Add any item by name, or paste a supported link.</p>
         ${banner}
+        <form method="post" action="/add" class="bg-white border border-slate-200 rounded-xl p-5 space-y-3">
+          <div class="grid sm:grid-cols-[10rem_1fr] gap-3">
+            <select name="kind" required class="border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white">
+              <option value="artist">Artist</option><option value="album">Album</option><option value="track">Track</option>
+              <option value="book">Book</option><option value="movie">Movie</option><option value="series">Series</option>
+              <option value="anime">Anime</option><option value="manga">Manga</option>
+            </select>
+            <input name="title" required placeholder="Title or name" autofocus
+              class="border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900/10" />
+          </div>
+          <input name="creator" placeholder="Artist or author (optional; useful for albums, tracks, and books)"
+            class="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900/10" />
+          ${artistTypeSelect()}
+          <button class="w-full bg-slate-900 text-white px-4 py-2 rounded-lg text-sm hover:bg-slate-700">Find and add</button>
+          <p class="text-xs text-slate-500">We'll search the best available catalogue first, then save your entry even when no match is found.</p>
+        </form>
+        <div class="flex items-center gap-3 my-6 text-xs text-slate-400"><span class="h-px bg-slate-200 flex-1"></span>or add by link<span class="h-px bg-slate-200 flex-1"></span></div>
         <form method="post" action="/add" class="flex gap-2">
-          <input name="url" type="url" required placeholder="https://open.spotify.com/track/..." autofocus
+          <input name="url" type="url" required placeholder="https://open.spotify.com/track/..."
             class="flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900/10" />
           <button class="bg-slate-900 text-white px-4 py-2 rounded-lg text-sm hover:bg-slate-700">Save</button>
         </form>
+        <a href="/live/add" class="block text-center text-sm text-emerald-700 hover:underline mt-5">+ Add a live show</a>
       </div>
     `,
   );
 }
 
-export function libraryPage(artists: ArtistSummary[]) {
-  const body = artists.length
+export interface EditField { name: string; label: string; value?: string | number | null; type?: "text" | "number" | "date" | "select"; options?: Record<string, string>; multiline?: boolean; hint?: string; }
+
+export function editEntryPage(title: string, back: string, action: string, fields: EditField[], deleteAction?: string) {
+  return layout(
+    `Edit ${title} · medialib`,
+    html`<div class="max-w-2xl"><a href="${back}" class="text-sm text-slate-500 hover:underline">← Cancel</a>
+      <h1 class="text-2xl font-bold tracking-tight mt-3 mb-6">Edit ${title}</h1>
+      <form method="post" action="${action}" class="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
+        ${fields.map((field) => html`<label class="block text-sm font-medium text-slate-700">${field.label}
+          ${field.multiline
+            ? html`<textarea name="${field.name}" rows="4" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-2 text-sm">${field.value ?? ""}</textarea>`
+            : field.type === "select"
+              ? html`<select name="${field.name}" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white">
+                  ${Object.entries(field.options ?? {}).map(([key, label]) => html`<option value="${key}" ${field.value === key ? "selected" : ""}>${label}</option>`)}
+                </select>`
+            : html`<input name="${field.name}" type="${field.type ?? "text"}" value="${field.value ?? ""}" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" />`}
+          ${field.hint ? html`<span class="block mt-1 text-xs font-normal text-slate-500">${field.hint}</span>` : ""}
+        </label>`)}
+        <button class="bg-slate-900 text-white px-4 py-2 rounded-lg text-sm hover:bg-slate-700">Save changes</button>
+      </form>
+      ${deleteAction ? html`<form method="post" action="${deleteAction}" class="mt-5" onsubmit="return confirm('Delete this entry? This cannot be undone.')">
+        <button class="text-sm text-red-600 hover:underline">Delete ${title}</button>
+      </form>` : ""}
+    </div>`,
+  );
+}
+
+function musicTabs(view: MusicView) {
+  const tab = (key: MusicView, label: string) =>
+    html`<a href="${musicHref(key)}"
+      class="px-3 py-1.5 rounded-lg text-sm ${view === key ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"}">${label}</a>`;
+  return html`<div class="flex items-center gap-2 mb-6">${tab("artists", "Artists")}${tab("tracks", "Tracks")}${tab("albums", "Albums")}</div>`;
+}
+
+function trackRows(tracks: TrackRow[]) {
+  return html`<div class="bg-white border border-slate-200 rounded-xl divide-y divide-slate-100">
+    ${tracks.map(
+      (t) => html`
+        <div class="grid grid-cols-[1fr_auto] md:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,0.8fr)_auto] items-center gap-3 px-4 py-2.5">
+          <span class="min-w-0">
+            <a href="/track/${t.id}" class="block text-sm font-medium truncate hover:underline">${t.title}</a>
+            <span class="block md:hidden text-xs text-slate-400 truncate">${artistText(t)}${t.album ? ` · ${t.album}` : ""}</span>
+          </span>
+          <span class="hidden md:block min-w-0 text-sm text-slate-600 truncate">${artistText(t)}</span>
+          <span class="hidden md:block min-w-0 text-xs text-slate-400 truncate">${t.album ?? ""}</span>
+          <span class="flex items-center gap-3 shrink-0">
+            ${stars("track", t.id, t.rating)}
+            ${favBtn(t.id, !!t.favorite)}
+            <span class="text-xs text-slate-400 tabular-nums w-9 text-right">${fmtDuration(t.duration_ms)}</span>
+          </span>
+        </div>
+      `,
+    )}
+  </div>`;
+}
+
+function albumGrid(albums: AlbumRow[]) {
+  return html`<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
+    ${albums.map(
+      (al) => html`
+        <div class="bg-white border border-slate-200 rounded-xl p-3">
+          <a href="/album/${al.id}" class="block">
+            ${mediaSrc(al.cover_key, al.cover_url)
+              ? html`<img loading="lazy" decoding="async" src="${mediaSrc(al.cover_key, al.cover_url)}" alt="" class="w-full aspect-square rounded-lg object-cover mb-2 bg-slate-100" />`
+              : html`<div class="w-full aspect-square rounded-lg bg-slate-100 mb-2 flex items-center justify-center text-slate-300 text-2xl">♪</div>`}
+            <div class="text-sm font-medium truncate">${al.title}</div>
+          </a>
+          ${al.artist_id && al.artist ? html`<a href="/artist/${al.artist_id}" class="block text-xs text-slate-500 truncate hover:underline">${al.artist}</a>` : ""}
+          <div class="flex items-center justify-between mt-1 gap-2">
+            <span class="text-xs text-slate-400">${[al.year, al.tracks ? `${al.tracks} tracks` : ""].filter(Boolean).join(" · ")}</span>
+            ${stars("album", al.id, al.rating)}
+          </div>
+        </div>
+      `,
+    )}
+  </div>`;
+}
+
+export function libraryPage(view: MusicView, data: PageResult<ArtistSummary | AlbumRow | TrackRow>) {
+  let body: HtmlEscapedString | Promise<HtmlEscapedString>;
+  if (view === "tracks") {
+    const tracks = data.items as TrackRow[];
+    body = tracks.length ? trackRows(tracks) : html`<p class="text-slate-500 text-sm">No tracks yet. <a class="underline" href="/add">Add a link</a>.</p>`;
+  } else if (view === "albums") {
+    const albums = data.items as AlbumRow[];
+    body = albums.length ? albumGrid(albums) : html`<p class="text-slate-500 text-sm">No albums yet. <a class="underline" href="/add">Add a link</a>.</p>`;
+  } else {
+    const artists = data.items as ArtistSummary[];
+    body = artists.length
     ? html`<div class="grid sm:grid-cols-2 md:grid-cols-3 gap-3">
         ${artists.map(
           (a) => html`
             <a href="/artist/${a.id}" class="flex items-center gap-3 bg-white border border-slate-200 rounded-xl p-4 hover:border-slate-300">
               ${mediaSrc(a.image_key, a.image_url)
-                ? html`<img src="${mediaSrc(a.image_key, a.image_url)}" alt="" class="w-12 h-12 rounded-full object-cover bg-slate-100" />`
+                ? html`<img loading="lazy" decoding="async" src="${mediaSrc(a.image_key, a.image_url)}" alt="" class="w-12 h-12 rounded-full object-cover bg-slate-100" />`
                 : html`<span class="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center text-slate-300">♪</span>`}
               <span class="min-w-0">
                 <span class="block font-medium truncate">${a.name}</span>
@@ -172,19 +330,31 @@ export function libraryPage(artists: ArtistSummary[]) {
         )}
       </div>`
     : html`<p class="text-slate-500 text-sm">No music yet. <a class="underline" href="/add">Add a link</a>.</p>`;
-  return layout("Music · medialib", html`<h1 class="text-2xl font-bold tracking-tight mb-6">Music</h1>${body}`);
+  }
+  return layout(
+    "Music · medialib",
+    html`<div class="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3 mb-5">
+        <div>
+          <h1 class="text-2xl font-bold tracking-tight">Music</h1>
+          <p class="text-sm text-slate-500 mt-1">Browse by artist, track, or album.</p>
+        </div>
+      </div>
+      ${musicTabs(view)}
+      ${body}${pager(data, musicHref(view))}`,
+  );
 }
 
 const STATUS_LABEL: Record<string, string> = { want: "Want to read", reading: "Reading", read: "Read" };
 
-export function booksPage(books: BookRow[]) {
+export function booksPage(page: PageResult<BookRow>) {
+  const books = page.items;
   const body = books.length
     ? html`<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
         ${books.map(
           (b) => html`
             <a href="/book/${b.id}" class="block bg-white border border-slate-200 rounded-xl p-3 hover:border-slate-300">
               ${mediaSrc(b.cover_key, b.cover_url)
-                ? html`<img src="${mediaSrc(b.cover_key, b.cover_url)}" alt="" class="w-full aspect-[2/3] rounded-lg object-cover mb-2 bg-slate-100" />`
+                ? html`<img loading="lazy" decoding="async" src="${mediaSrc(b.cover_key, b.cover_url)}" alt="" class="w-full aspect-[2/3] rounded-lg object-cover mb-2 bg-slate-100" />`
                 : html`<div class="w-full aspect-[2/3] rounded-lg bg-slate-100 mb-2 flex items-center justify-center text-slate-300 text-2xl">📖</div>`}
               <div class="text-sm font-medium leading-tight line-clamp-2">${b.title}</div>
               ${b.author ? html`<div class="text-xs text-slate-500 truncate">${b.author}</div>` : ""}
@@ -194,7 +364,152 @@ export function booksPage(books: BookRow[]) {
         )}
       </div>`
     : html`<p class="text-slate-500 text-sm">No books yet. Send a Goodreads link to the bot or use <a class="underline" href="/add">Add</a>.</p>`;
-  return layout("Books · medialib", html`<h1 class="text-2xl font-bold tracking-tight mb-6">Books</h1>${body}`);
+  return layout("Books · medialib", html`<h1 class="text-2xl font-bold tracking-tight mb-6">Books</h1>${body}${pager(page, "/books")}`);
+}
+
+const MEDIA_LABELS: Record<MediaKind, { title: string; empty: string; fallback: string }> = {
+  movie: { title: "Movies", empty: "No movies yet.", fallback: "🎬" },
+  series: { title: "Series", empty: "No series yet.", fallback: "▣" },
+  anime: { title: "Anime", empty: "No anime yet. Add a MyAnimeList anime link.", fallback: "◉" },
+  manga: { title: "Manga", empty: "No manga yet. Add a MyAnimeList manga link.", fallback: "▤" },
+};
+
+export function mediaListPage(kind: MediaKind, page: PageResult<MediaRow>) {
+  const items = page.items;
+  const label = MEDIA_LABELS[kind];
+  const body = items.length
+    ? html`<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
+        ${items.map(
+          (m) => html`
+            <a href="/item/${m.id}" class="block bg-white border border-slate-200 rounded-xl p-3 hover:border-slate-300">
+              ${mediaSrc(m.cover_key, m.cover_url)
+                ? html`<img loading="lazy" decoding="async" src="${mediaSrc(m.cover_key, m.cover_url)}" alt="" class="w-full aspect-[2/3] rounded-lg object-cover mb-2 bg-slate-100" />`
+                : html`<div class="w-full aspect-[2/3] rounded-lg bg-slate-100 mb-2 flex items-center justify-center text-slate-300 text-2xl">${label.fallback}</div>`}
+              <div class="text-sm font-medium leading-tight line-clamp-2">${m.title}</div>
+              <div class="flex items-center justify-between mt-1 gap-2">
+                ${m.year ? html`<span class="text-xs text-slate-400">${m.year}</span>` : html`<span></span>`}
+                ${stars("media", m.id, m.rating)}
+              </div>
+              ${m.list_status || mediaProgress(m)
+                ? html`<div class="text-[11px] text-slate-500 mt-1 truncate">${[m.list_status, mediaProgress(m)].filter(Boolean).join(" · ")}</div>`
+                : ""}
+            </a>
+          `,
+        )}
+      </div>`
+    : html`<p class="text-slate-500 text-sm">${label.empty} <a class="underline" href="/add">Add a link</a>.</p>`;
+  const path = kind === "movie" ? "/movies" : kind === "series" ? "/series" : `/${kind}`;
+  return layout(`${label.title} · medialib`, html`<h1 class="text-2xl font-bold tracking-tight mb-6">${label.title}</h1>${body}${pager(page, path)}`);
+}
+
+export function mediaItemPage(item: MediaDetail) {
+  const cover = mediaSrc(item.cover_key, item.cover_url);
+  const label = MEDIA_LABELS[item.kind];
+  const meta = [item.kind, item.media_format, item.year].filter(Boolean).join(" · ");
+  const listMeta = [item.list_status, mediaProgress(item), item.personal_score ? `${item.personal_score}/10` : ""].filter(Boolean).join(" · ");
+  return layout(
+    `${item.title} · medialib`,
+    html`
+      <a href="/${item.kind === "movie" ? "movies" : item.kind}" class="text-sm text-slate-500 hover:underline">← ${label.title}</a>
+      <div class="flex flex-col sm:flex-row gap-6 mt-3">
+        <div class="shrink-0 w-40">
+          ${cover
+            ? html`<img loading="lazy" decoding="async" src="${cover}" alt="" class="w-40 rounded-xl object-cover bg-slate-100" />`
+            : html`<div class="w-40 aspect-[2/3] rounded-xl bg-slate-100 flex items-center justify-center text-slate-300 text-3xl">${label.fallback}</div>`}
+        </div>
+        <div class="min-w-0 flex-1">
+          <h1 class="text-2xl font-bold tracking-tight">${item.title}</h1>
+          <a href="/edit/media/${item.id}" class="inline-block mt-2 text-sm text-emerald-700 hover:underline">Edit</a>
+          ${meta ? html`<p class="text-sm text-slate-500 mt-1">${meta}</p>` : ""}
+          ${listMeta ? html`<p class="text-sm text-emerald-700 mt-1">${listMeta}</p>` : ""}
+          <div class="flex items-center gap-3 mt-4">
+            <span class="text-sm text-slate-600 flex items-center gap-2">Rating ${stars("media", item.id, item.rating)}</span>
+            ${item.source_url ? html`<a href="${item.source_url}" target="_blank" rel="noopener" class="text-sm text-emerald-600 hover:underline">${item.source ?? "source"}</a>` : ""}
+          </div>
+          ${item.description ? html`<p class="text-sm text-slate-600 mt-5 leading-relaxed">${item.description}</p>` : ""}
+          ${item.notes ? html`<p class="text-sm text-slate-600 mt-5 leading-relaxed">${item.notes}</p>` : ""}
+          ${item.tags ? html`<p class="text-xs text-slate-400 mt-4">${item.tags}</p>` : ""}
+        </div>
+      </div>
+    `,
+  );
+}
+
+function liveYear(show: LiveShow): string {
+  return show.date ? show.date.slice(0, 4) : "Date not noted";
+}
+
+export function liveShowsPage(shows: LiveShow[], artistLinks = new Map<string, { id: number; name: string }>()) {
+  const venues = new Set(shows.map((show) => show.venue)).size;
+  const dated = shows.filter((show) => show.date);
+  const latest = dated[0];
+  const years = Array.from(new Set(dated.map(liveYear))).sort((a, b) => Number(b) - Number(a));
+  const grouped = years.map((year) => ({ year, shows: shows.filter((show) => liveYear(show) === year) }));
+  const undated = shows.filter((show) => !show.date);
+  if (undated.length) grouped.push({ year: "Date not noted", shows: undated });
+
+  return layout(
+    "Live shows · medialib",
+    html`
+      <div class="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3 mb-6">
+        <div>
+          <h1 class="text-2xl font-bold tracking-tight">Live shows</h1>
+          <p class="text-sm text-slate-500 mt-1">Concert notes, festival sets, rooms, sound, and highlights.</p>
+        </div>
+        <div class="grid grid-cols-3 gap-2 text-center text-sm">
+          <div class="bg-white border border-slate-200 rounded-xl px-4 py-3">
+            <div class="font-semibold text-slate-900">${shows.length}</div>
+            <div class="text-xs text-slate-500">shows</div>
+          </div>
+          <div class="bg-white border border-slate-200 rounded-xl px-4 py-3">
+            <div class="font-semibold text-slate-900">${venues}</div>
+            <div class="text-xs text-slate-500">venues</div>
+          </div>
+          <div class="bg-white border border-slate-200 rounded-xl px-4 py-3">
+            <div class="font-semibold text-slate-900">${latest?.dateLabel ?? "-"}</div>
+            <div class="text-xs text-slate-500">latest</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="space-y-8">
+        ${grouped.map(
+          (group) => html`
+            <section>
+              <h2 class="text-sm font-semibold uppercase tracking-wide text-slate-400 mb-3">${group.year}</h2>
+              <div class="space-y-3">
+                ${group.shows.map((show) => {
+                  const meta = [show.dateLabel, show.venue, show.city].filter(Boolean).join(" · ");
+                  const artist = artistLinks.get(show.slug);
+                  return html`
+                    <article id="${show.slug}" class="bg-white border border-slate-200 rounded-xl p-5">
+                      <div class="flex flex-col md:flex-row md:items-start md:justify-between gap-3">
+                        <div class="min-w-0">
+                          <h3 class="text-lg font-semibold tracking-tight text-slate-900">${artist ? html`<a href="/artist/${artist.id}" class="hover:underline">${show.artist}</a>` : show.artist}</h3>
+                          <p class="text-sm text-slate-500 mt-0.5">${meta}</p>
+                          <a href="/live/${show.slug}/edit" class="inline-block mt-2 text-xs text-emerald-700 hover:underline">Edit show</a>
+                          ${show.context || show.companions
+                            ? html`<p class="text-xs text-slate-400 mt-1">${[show.context, show.companions ? `with ${show.companions}` : ""].filter(Boolean).join(" · ")}</p>`
+                            : ""}
+                        </div>
+                        <div class="flex flex-wrap gap-1.5 md:justify-end">
+                          ${show.tags.map((tag) => html`<span class="text-[11px] rounded-full bg-slate-100 px-2 py-1 text-slate-500">${tag}</span>`)}
+                        </div>
+                      </div>
+                      <p class="text-sm text-slate-700 leading-relaxed mt-4">${show.summary}</p>
+                      <ul class="mt-4 space-y-1.5 text-sm text-slate-600">
+                        ${show.notes.map((note) => html`<li class="flex gap-2"><span class="text-slate-300">-</span><span>${note}</span></li>`)}
+                      </ul>
+                    </article>
+                  `;
+                })}
+              </div>
+            </section>
+          `,
+        )}
+      </div>
+    `,
+  );
 }
 
 export function bookPage(b: BookDetail) {
@@ -211,11 +526,12 @@ export function bookPage(b: BookDetail) {
       <div class="flex flex-col sm:flex-row gap-6 mt-3">
         <div class="shrink-0 w-40">
           ${cover
-            ? html`<img src="${cover}" alt="" class="w-40 rounded-xl object-cover bg-slate-100" />`
+            ? html`<img loading="lazy" decoding="async" src="${cover}" alt="" class="w-40 rounded-xl object-cover bg-slate-100" />`
             : html`<div class="w-40 aspect-[2/3] rounded-xl bg-slate-100 flex items-center justify-center text-slate-300 text-3xl">📖</div>`}
         </div>
         <div class="min-w-0 flex-1">
           <h1 class="text-2xl font-bold tracking-tight">${b.title}</h1>
+          <a href="/edit/book/${b.id}" class="inline-block mt-2 text-sm text-emerald-700 hover:underline">Edit</a>
           ${meta ? html`<p class="text-sm text-slate-500 mt-1">${meta}</p>` : ""}
           <div class="flex items-center gap-4 mt-4">
             <label class="text-sm text-slate-600">Status
@@ -234,6 +550,59 @@ export function bookPage(b: BookDetail) {
   );
 }
 
+export function albumPage(detail: AlbumDetail) {
+  const { album, tracks } = detail;
+  const cover = mediaSrc(album.cover_key, album.cover_url);
+  return layout(
+    `${album.title} · medialib`,
+    html`
+      <a href="${musicHref("albums")}" class="text-sm text-slate-500 hover:underline">← Albums</a>
+      <div class="flex flex-col sm:flex-row gap-6 mt-3 mb-8">
+        <div class="shrink-0 w-40">
+          ${cover
+            ? html`<img loading="lazy" decoding="async" src="${cover}" alt="" class="w-40 aspect-square rounded-xl object-cover bg-slate-100" />`
+            : html`<div class="w-40 aspect-square rounded-xl bg-slate-100 flex items-center justify-center text-slate-300 text-3xl">♪</div>`}
+        </div>
+        <div class="min-w-0 flex-1">
+          <h1 class="text-2xl font-bold tracking-tight">${album.title}</h1>
+          <a href="/edit/album/${album.id}" class="inline-block mt-2 text-sm text-emerald-700 hover:underline">Edit</a>
+          <p class="text-sm text-slate-500 mt-1">
+            ${album.artist_id && album.artist ? html`<a href="/artist/${album.artist_id}" class="hover:underline">${album.artist}</a>` : "Unknown artist"}
+            ${album.year ? ` · ${album.year}` : ""}
+            ${album.tracks ? ` · ${album.tracks} tracks` : ""}
+          </p>
+          <div class="text-sm text-slate-600 flex items-center gap-2 mt-4">Rating ${stars("album", album.id, album.rating)}</div>
+        </div>
+      </div>
+      ${tracks.length ? html`<h2 class="font-semibold mb-2">Tracks</h2>${trackRows(tracks)}` : ""}
+    `,
+  );
+}
+
+export function trackPage(detail: TrackDetail) {
+  const { track, artists } = detail;
+  const artistLinks = artists.length
+    ? artists.map((a, i) => html`${i ? ", " : ""}<a href="/artist/${a.id}" class="hover:underline">${a.name}</a>`)
+    : [html`${artistText(track)}`];
+  const meta = [track.album, fmtDuration(track.duration_ms)].filter(Boolean).join(" · ");
+  return layout(
+    `${track.title} · medialib`,
+    html`
+      <a href="${musicHref("tracks")}" class="text-sm text-slate-500 hover:underline">← Tracks</a>
+      <div class="mt-3">
+        <h1 class="text-2xl font-bold tracking-tight">${track.title}</h1>
+        <a href="/edit/track/${track.id}" class="inline-block mt-2 text-sm text-emerald-700 hover:underline">Edit</a>
+        <p class="text-sm text-slate-500 mt-1">${artistLinks}</p>
+        ${meta ? html`<p class="text-sm text-slate-500 mt-1">${meta}</p>` : ""}
+        <div class="flex items-center gap-4 mt-4">
+          <span class="text-sm text-slate-600 flex items-center gap-2">Rating ${stars("track", track.id, track.rating)}</span>
+          ${favBtn(track.id, !!track.favorite)}
+        </div>
+      </div>
+    `,
+  );
+}
+
 export function artistPage(detail: ArtistDetail) {
   const { artist, albums, tracks } = detail;
   return layout(
@@ -242,50 +611,56 @@ export function artistPage(detail: ArtistDetail) {
       <a href="/library" class="text-sm text-slate-500 hover:underline">← Music</a>
       <div class="flex items-center gap-4 mt-3 mb-8">
         ${mediaSrc(artist.image_key, artist.image_url)
-          ? html`<img src="${mediaSrc(artist.image_key, artist.image_url)}" alt="" class="w-20 h-20 rounded-full object-cover bg-slate-100" />`
+          ? html`<img loading="lazy" decoding="async" src="${mediaSrc(artist.image_key, artist.image_url)}" alt="" class="w-20 h-20 rounded-full object-cover bg-slate-100" />`
           : html`<span class="w-20 h-20 rounded-full bg-slate-100 flex items-center justify-center text-slate-300 text-2xl">♪</span>`}
         <div>
           <h1 class="text-2xl font-bold tracking-tight">${artist.name}</h1>
-          ${artist.genres ? html`<p class="text-sm text-slate-500">${artist.genres}</p>` : ""}
+          <a href="/edit/artist/${artist.id}" class="inline-block mt-2 text-sm text-emerald-700 hover:underline">Edit</a>
+          <p class="text-sm text-slate-500">${ARTIST_TYPE_LABELS[artist.artist_type] ?? artist.artist_type}${artist.genres ? ` · ${artist.genres}` : ""}</p>
         </div>
       </div>
       ${albums.length
         ? html`<h2 class="font-semibold mb-2">Albums</h2>
-            <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-8">
-              ${albums.map(
-                (al) => html`
-                  <div class="bg-white border border-slate-200 rounded-xl p-3">
-                    ${mediaSrc(al.cover_key, al.cover_url)
-                      ? html`<img src="${mediaSrc(al.cover_key, al.cover_url)}" alt="" class="w-full aspect-square rounded-lg object-cover mb-2 bg-slate-100" />`
-                      : html`<div class="w-full aspect-square rounded-lg bg-slate-100 mb-2"></div>`}
-                    <div class="text-sm font-medium truncate">${al.title}</div>
-                    <div class="flex items-center justify-between">
-                      ${al.year ? html`<span class="text-xs text-slate-400">${al.year}</span>` : html`<span></span>`}
-                      ${stars("album", al.id, al.rating)}
-                    </div>
-                  </div>
-                `,
-              )}
-            </div>`
+            <div class="mb-8">${albumGrid(albums)}</div>`
         : ""}
       ${tracks.length
-        ? html`<h2 class="font-semibold mb-2">Tracks</h2>
-            <div class="bg-white border border-slate-200 rounded-xl divide-y divide-slate-100">
-              ${tracks.map(
-                (t) => html`
-                  <div class="flex items-center justify-between gap-3 px-4 py-2">
-                    <span class="min-w-0"><span class="block text-sm truncate">${t.title}</span>
-                      ${t.album ? html`<span class="block text-xs text-slate-400 truncate">${t.album}</span>` : ""}</span>
-                    <span class="flex items-center gap-3 shrink-0">
-                      ${stars("track", t.id, t.rating)}
-                      ${favBtn(t.id, !!t.favorite)}
-                      <span class="text-xs text-slate-400 tabular-nums w-9 text-right">${fmtDuration(t.duration_ms)}</span>
-                    </span>
-                  </div>
-                `,
-              )}
-            </div>`
+        ? html`<h2 class="font-semibold mb-2">Tracks</h2>${trackRows(tracks)}`
         : ""}
+    `,
+  );
+}
+
+export function searchPage(query: string, results: SearchResult[]) {
+  const q = query.trim();
+  const rows = results.length
+    ? results.map(
+        (r) => html`
+          <a href="${r.href}" class="grid sm:grid-cols-[7rem_1fr] gap-1 sm:gap-4 px-4 py-3 hover:bg-slate-50">
+            <span class="text-xs uppercase tracking-wide text-slate-400">${r.type}</span>
+            <span class="min-w-0">
+              <span class="block text-sm font-medium truncate">${r.name}</span>
+              ${r.sub ? html`<span class="block text-xs text-slate-500 truncate">${r.sub}</span>` : ""}
+            </span>
+          </a>
+        `,
+      )
+    : [
+        q
+          ? html`<p class="text-sm text-slate-500 px-4 py-3">No matches for "${q}".</p>`
+          : html`<p class="text-sm text-slate-500 px-4 py-3">Search artists, tracks, albums, books, movies, series, anime, and manga.</p>`,
+      ];
+  return layout(
+    "Search · medialib",
+    html`
+      <div class="max-w-2xl">
+        <h1 class="text-2xl font-bold tracking-tight mb-5">Search</h1>
+        <form action="/search" method="get" class="flex gap-2 mb-5">
+          <input name="q" type="search" value="${q}" autofocus placeholder="Search library"
+            class="flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900/10" />
+          <button class="bg-slate-900 text-white px-4 py-2 rounded-lg text-sm hover:bg-slate-700">Search</button>
+        </form>
+        <div class="bg-white border border-slate-200 rounded-xl divide-y divide-slate-100">${rows}</div>
+      </div>
     `,
   );
 }
