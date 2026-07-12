@@ -3,6 +3,8 @@
 .dev.vars
 .cache
 data/
+import/*.json
+import/*.sql
 
 # cloudflare / wrangler
 .wrangler/
