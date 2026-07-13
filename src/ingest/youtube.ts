@@ -21,9 +21,9 @@ export function videoToTrack(
   // "Artist - Song" is the dominant convention; fall back to the channel name.
   const dash = title.match(/^(.*?)\s+[-–—]\s+(.*)$/);
   if (dash) {
-    return { entityType: "track", title: dash[2].trim(), artist: dash[1].trim(), durationMs, coverUrl };
+    return { kind: "track", title: dash[2].trim(), artist: dash[1].trim(), durationMs, coverUrl };
   }
-  return { entityType: "track", title, artist: chan || "Unknown", durationMs, coverUrl };
+  return { kind: "track", title, artist: chan || "Unknown", durationMs, coverUrl };
 }
 
 interface YtVideoResponse {
@@ -61,8 +61,8 @@ async function fetchViaOembed(url: string): Promise<Fetched | null> {
 }
 
 export async function fetchYouTube(c: Classified, env: Env): Promise<Fetched | null> {
-  if (c.kind !== "video") return null; // playlist expansion deferred
+  if (c.itemKind !== "track") return null; // playlist expansion deferred
   // Prefer the official Data API (richer: real duration) when a key is configured.
-  if (env.YOUTUBE_API_KEY) return fetchViaDataApi(c.sourceId, env.YOUTUBE_API_KEY);
+  if (env.YOUTUBE_API_KEY) return fetchViaDataApi(c.providerId, env.YOUTUBE_API_KEY);
   return fetchViaOembed(c.url);
 }

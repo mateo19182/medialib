@@ -27,6 +27,8 @@ export interface LibraryStats {
   series: number;
   anime: number;
   manga: number;
+  webtoons: number;
+  comics: number;
   links: number;
   pending: number;
 }

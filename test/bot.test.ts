@@ -1,6 +1,6 @@
 import { SELF } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
-import { extractUrls, parseCommand } from "../src/bot/telegram";
+import { extractUrls, parseCommand, parseLiveShow } from "../src/bot/telegram";
 import { isTextAddKind } from "../src/ingest/text";
 
 describe("bot helpers", () => {
@@ -23,6 +23,16 @@ describe("bot helpers", () => {
     expect(isTextAddKind("book")).toBe(true);
     expect(isTextAddKind("series")).toBe(true);
     expect(isTextAddKind("podcast")).toBe(false);
+  });
+
+  it("parses a manual live show", () => {
+    expect(parseLiveShow("Vulfpeck | 2026-07-08 | O2 Arena | London | Great set | Loud bass | funk, arena")).toEqual({
+      artist: "Vulfpeck", date: "2026-07-08", venue: "O2 Arena", city: "London", summary: "Great set", notes: "Loud bass", tags: "funk, arena",
+    });
+  });
+
+  it("documents the cancel command", () => {
+    expect(parseCommand("/cancel")).toEqual({ cmd: "cancel", args: "" });
   });
 });
 

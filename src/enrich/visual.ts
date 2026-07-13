@@ -1,7 +1,7 @@
-import type { MediaKind } from "../ingest/types";
+import type { Provider, VisualKind } from "../ingest/types";
 
 export interface ImageMatch {
-  provider: string;
+  provider: Provider;
   id: string;
   url?: string;
   imageUrl?: string;
@@ -43,7 +43,7 @@ export async function findJikanMedia(kind: "anime" | "manga", malId: string): Pr
   const aired = item.aired as { from?: string } | undefined;
   const published = item.published as { from?: string } | undefined;
   return {
-    provider: `myanimelist:${kind}`,
+    provider: "myanimelist",
     id: String(item.mal_id),
     url: typeof item.url === "string" ? item.url : undefined,
     imageUrl: images?.jpg?.large_image_url ?? images?.jpg?.image_url,
@@ -73,6 +73,6 @@ export async function findTmdbMedia(kind: "movie" | "series", title: string, rel
   };
 }
 
-export function isVisualKind(kind: MediaKind): kind is "movie" | "series" | "anime" | "manga" {
-  return kind === "movie" || kind === "series" || kind === "anime" || kind === "manga";
+export function isVisualKind(kind: string): kind is VisualKind {
+  return kind === "movie" || kind === "series" || kind === "anime" || kind === "manga" || kind === "webtoon" || kind === "comic";
 }

@@ -1,32 +1,40 @@
-export type Source = "spotify" | "youtube" | "bandcamp" | "goodreads" | "myanimelist";
-export type MediaKind = "movie" | "series" | "anime" | "manga";
-export type SourceKind = "track" | "album" | "artist" | "playlist" | "video" | "book" | "anime" | "manga";
-export type EntityType = "artist" | "album" | "track" | "book" | MediaKind;
+export const ITEM_KINDS = ["author", "artist", "album", "track", "book", "movie", "series", "anime", "manga", "webtoon", "comic"] as const;
+export type ItemKind = (typeof ITEM_KINDS)[number];
+
+export const VISUAL_KINDS = ["movie", "series", "anime", "manga", "webtoon", "comic"] as const;
+export type VisualKind = (typeof VISUAL_KINDS)[number];
+
+export const PROVIDERS = [
+  "spotify", "youtube", "bandcamp", "goodreads", "myanimelist", "webtoon", "manual",
+  "deezer", "openlibrary", "tmdb", "musicbrainz", "musicbrainz-release",
+  "musicbrainz-recording", "isrc", "isbn", "deezer-artist", "deezer-album",
+] as const;
+export type Provider = (typeof PROVIDERS)[number];
 export const ARTIST_TYPES = ["musician", "visual_artist", "filmmaker", "writer", "performer", "other"] as const;
 export type ArtistType = (typeof ARTIST_TYPES)[number];
 
 export interface Classified {
-  source: Source;
-  kind: SourceKind;
-  sourceId: string;
+  provider: Provider;
+  itemKind: ItemKind | null;
+  providerId: string;
   url: string;
 }
 
 export interface FetchedArtist {
-  entityType: "artist";
+  kind: "artist";
   name: string;
   artistType?: ArtistType;
   imageUrl?: string;
 }
 export interface FetchedAlbum {
-  entityType: "album";
+  kind: "album";
   title: string;
   artist: string;
   year?: number;
   coverUrl?: string;
 }
 export interface FetchedTrack {
-  entityType: "track";
+  kind: "track";
   title: string;
   artist: string;
   album?: string;
@@ -36,7 +44,7 @@ export interface FetchedTrack {
   coverUrl?: string;
 }
 export interface FetchedBook {
-  entityType: "book";
+  kind: "book";
   title: string;
   author: string;
   isbn?: string;
@@ -45,13 +53,12 @@ export interface FetchedBook {
   description?: string;
   coverUrl?: string;
 }
-export interface FetchedMedia {
-  entityType: "media";
-  kind: MediaKind;
+export interface FetchedVisual {
+  kind: VisualKind;
   title: string;
   year?: number;
   description?: string;
   coverUrl?: string;
 }
 
-export type Fetched = FetchedArtist | FetchedAlbum | FetchedTrack | FetchedBook | FetchedMedia;
+export type Fetched = FetchedArtist | FetchedAlbum | FetchedTrack | FetchedBook | FetchedVisual;

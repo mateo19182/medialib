@@ -1,6 +1,7 @@
 import { env } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
 import { getLibrary } from "../src/types";
+import { scoreYouTubeMatch } from "../src/migrate/youtube";
 
 // Smoke test: the D1-backed library boots and serves counts.
 describe("Library DB", () => {
@@ -12,7 +13,7 @@ describe("Library DB", () => {
   it("starts empty with a valid schema", async () => {
     const lib = getLibrary(env);
     const stats = await lib.stats();
-    expect(stats).toEqual({ tracks: 0, artists: 0, albums: 0, books: 0, movies: 0, series: 0, anime: 0, manga: 0, links: 0, pending: 0 });
+    expect(stats).toEqual({ tracks: 0, artists: 0, albums: 0, books: 0, movies: 0, series: 0, anime: 0, manga: 0, webtoons: 0, comics: 0, links: 0, pending: 0 });
     expect(await lib.recent(5)).toEqual([]);
   });
 
@@ -73,7 +74,7 @@ describe("Library DB", () => {
       env.DB.prepare("INSERT INTO artists (id, name, normalized_name) VALUES (1301, 'Repair Alpha, Repair Beta', 'repair alpha repair beta')"),
       env.DB.prepare("INSERT INTO albums (id, title, normalized_title, artist_id) VALUES (2301, 'Repair Album', 'repair album', 1301)"),
       env.DB.prepare("INSERT INTO tracks (id, title, normalized_title, artist_id, album_id) VALUES (3301, 'Repair Track', 'repair track', 1301, 2301)"),
-      env.DB.prepare("INSERT INTO enrich_queue (entity_type, entity_id) VALUES ('artist', 1301)"),
+      env.DB.prepare("INSERT INTO enrich_queue (item_kind, item_id) VALUES ('artist', 1301)"),
     ]);
 
     expect(await lib.repairCompoundArtists(50)).toMatchObject({ repaired: 1, skipped: 0, failed: 0 });
@@ -83,20 +84,20 @@ describe("Library DB", () => {
     expect(artists.items.find((a) => a.name === "Repair Alpha")).toMatchObject({ tracks: 1, albums: 1 });
     expect(artists.items.find((a) => a.name === "Repair Beta")).toMatchObject({ tracks: 1, albums: 0 });
     expect((await lib.listTracks(1000, 0)).items.find((t) => t.id === 3301)?.artists).toBe("Repair Alpha, Repair Beta");
-    expect(await env.DB.prepare("SELECT id FROM enrich_queue WHERE entity_id = 1301").first()).toBeNull();
+    expect(await env.DB.prepare("SELECT id FROM enrich_queue WHERE item_id = 1301").first()).toBeNull();
   });
 
   it("stores non-musician artists without music enrichment", async () => {
     const lib = getLibrary(env);
     const saved = await lib.saveText("artist", "Non Music Creator", "web", "", "visual_artist");
-    expect(saved).toMatchObject({ ok: true, entityType: "artist", title: "Non Music Creator" });
+    expect(saved).toMatchObject({ ok: true, itemKind: "artist", title: "Non Music Creator" });
 
     const hit = (await lib.search("Non Music Creator", 10)).find((item) => item.name === "Non Music Creator");
     if (!hit) throw new Error("missing non-musician artist search hit");
     expect(hit).toMatchObject({ type: "artist", sub: "visual artist" });
     const detail = await lib.artistDetail(hit.id);
     expect(detail?.artist).toMatchObject({ name: "Non Music Creator", artist_type: "visual_artist" });
-    expect(await env.DB.prepare("SELECT id FROM enrich_queue WHERE entity_type = 'artist' AND entity_id = ?").bind(hit.id).first()).toBeNull();
+    expect(await env.DB.prepare("SELECT id FROM enrich_queue WHERE item_kind = 'artist' AND item_id = ?").bind(hit.id).first()).toBeNull();
 
     const musicArtists = await lib.listArtists(1000, 0);
     expect(musicArtists.items.some((artist) => artist.name === "Non Music Creator")).toBe(false);
@@ -144,27 +145,119 @@ describe("Library DB", () => {
     });
 
     const row = await env.DB.prepare(
-      "SELECT entity_type, provider, external_id, is_primary FROM external_ids WHERE entity_type = 'artist' AND entity_id = 5001",
-    ).first<{ entity_type: string; provider: string; external_id: string; is_primary: number }>();
-    expect(row).toEqual({ entity_type: "artist", provider: "musicbrainz", external_id: "7e5b4b73-0014-4c04-8b3f-9a1cc7b0a001", is_primary: 1 });
+      "SELECT item_kind, provider, provider_id, is_primary FROM item_sources WHERE item_kind = 'artist' AND item_id = 5001",
+    ).first<{ item_kind: string; provider: string; provider_id: string; is_primary: number }>();
+    expect(row).toEqual({ item_kind: "artist", provider: "musicbrainz", provider_id: "7e5b4b73-0014-4c04-8b3f-9a1cc7b0a001", is_primary: 1 });
+  });
+
+  it("uses item kind to namespace provider identifiers", async () => {
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO media_items (id, kind, title, normalized_title) VALUES (5101, 'anime', 'Shared ID Anime', 'shared id anime')"),
+      env.DB.prepare("INSERT INTO media_items (id, kind, title, normalized_title) VALUES (5102, 'manga', 'Shared ID Manga', 'shared id manga')"),
+      env.DB.prepare("INSERT INTO item_sources (item_kind, item_id, provider, provider_id) VALUES ('anime', 5101, 'myanimelist', '42')"),
+      env.DB.prepare("INSERT INTO item_sources (item_kind, item_id, provider, provider_id) VALUES ('manga', 5102, 'myanimelist', '42')"),
+    ]);
+
+    const rows = await env.DB.prepare(
+      "SELECT item_kind, item_id FROM item_sources WHERE provider = 'myanimelist' AND provider_id = '42' ORDER BY item_kind",
+    ).all<{ item_kind: string; item_id: number }>();
+    expect(rows.results).toEqual([
+      { item_kind: "anime", item_id: 5101 },
+      { item_kind: "manga", item_id: 5102 },
+    ]);
+  });
+
+  it("counts only explicitly saved item sources as links", async () => {
+    const lib = getLibrary(env);
+    const before = (await lib.stats()).links;
+    await env.DB.prepare(
+      "INSERT INTO item_sources (item_kind, item_id, provider, provider_id) VALUES ('track', 9999, 'isrc', 'TEST-ISRC')",
+    ).run();
+    expect((await lib.stats()).links).toBe(before);
+    await env.DB.prepare(
+      "UPDATE item_sources SET saved_at = datetime('now'), saved_via = 'import' WHERE provider = 'isrc' AND provider_id = 'TEST-ISRC'",
+    ).run();
+    expect((await lib.stats()).links).toBe(before + 1);
+  });
+
+  it("initializes a resumable YouTube migration from tracks", async () => {
+    const lib = getLibrary(env);
+    await lib.importChunk({
+      artists: [{ id: 7001, name: "Migration Artist", normalized_name: "migration artist" }],
+      tracks: [{ id: 7101, title: "Migration Song", normalized_title: "migration song", artist_id: 7001 }],
+    });
+
+    const status = await lib.startYoutubeMigration(true);
+    expect(status.status).toBe("running");
+    expect(status.items_total).toBeGreaterThanOrEqual(1);
+    expect(await lib.youtubePendingMigrationTracks(25)).toContainEqual(
+      { track_id: 7101, title: "Migration Song", artists: "Migration Artist", query: "Migration Artist - Migration Song" },
+    );
+  });
+
+  it("configures YouTube source playlists and records synced videos", async () => {
+    const lib = getLibrary(env);
+    await lib.upsertYoutubeSyncPlaylist({
+      playlistId: "PL_SOURCE_TEST",
+      title: "Source Test",
+      scanLimit: 2,
+      stopAfterKnown: 10,
+    });
+
+    const playlist = (await lib.listYoutubeSyncPlaylists()).find((item) => item.playlist_id === "PL_SOURCE_TEST");
+    expect(playlist).toMatchObject({ title: "Source Test", enabled: 1, scan_limit: 2, stop_after_known: 10 });
+
+    const saved = await lib.saveSyncedYouTubeVideo({
+      playlistId: "PL_SOURCE_TEST",
+      playlistItemId: "PLI_SOURCE_1",
+      videoId: "VIDEO_SOURCE_1",
+      title: "Source Artist - Source Song",
+      channelTitle: "Source Artist - Topic",
+      position: 0,
+      rawJson: { id: "PLI_SOURCE_1" },
+    });
+    expect(saved).toMatchObject({ duplicate: false, itemKind: "track", title: "Source Song" });
+
+    const duplicate = await lib.saveSyncedYouTubeVideo({
+      playlistId: "PL_SOURCE_TEST",
+      playlistItemId: "PLI_SOURCE_1",
+      videoId: "VIDEO_SOURCE_1",
+      title: "Source Artist - Source Song",
+      channelTitle: "Source Artist - Topic",
+      position: 0,
+    });
+    expect(duplicate).toMatchObject({ duplicate: true, sourceId: saved.sourceId });
+
+    const known = await lib.existingYoutubeSyncPlaylistItems("PL_SOURCE_TEST", ["PLI_SOURCE_1", "PLI_MISSING"]);
+    expect([...known]).toEqual(["PLI_SOURCE_1"]);
+    const row = await env.DB.prepare(
+      "SELECT saved_via, provider, provider_id FROM item_sources WHERE id = ?",
+    ).bind(saved.sourceId).first<{ saved_via: string; provider: string; provider_id: string }>();
+    expect(row).toEqual({ saved_via: "youtube-sync", provider: "youtube", provider_id: "VIDEO_SOURCE_1" });
+  });
+
+  it("scores likely official YouTube music matches above loose matches", () => {
+    const track = { title: "Migration Song", artists: "Migration Artist" };
+    expect(scoreYouTubeMatch(track, "Migration Artist - Migration Song", "Migration Artist - Topic")).toBeGreaterThan(
+      scoreYouTubeMatch(track, "Migration Song live cover", "Someone Else"),
+    );
   });
 
   it("deletes a media item and all dependent catalog data", async () => {
     const lib = getLibrary(env);
     await env.DB.batch([
       env.DB.prepare("INSERT INTO media_items (id, kind, title, normalized_title, cover_key) VALUES (6001, 'movie', 'Delete Me', 'delete me', 'media/6001')"),
-      env.DB.prepare("INSERT INTO links (url, source, source_kind, source_id, entity_type, entity_id) VALUES ('https://example.com/delete', 'manual', 'movie', 'delete-me', 'movie', 6001)"),
-      env.DB.prepare("INSERT INTO external_ids (entity_type, entity_id, provider, external_id) VALUES ('movie', 6001, 'tmdb', '6001')"),
-      env.DB.prepare("INSERT INTO enrich_queue (entity_type, entity_id) VALUES ('media', 6001)"),
+      env.DB.prepare("INSERT INTO item_sources (url, provider, provider_id, item_kind, item_id, saved_at) VALUES ('https://example.com/delete', 'manual', 'delete-me', 'movie', 6001, datetime('now'))"),
+      env.DB.prepare("INSERT INTO item_sources (provider, provider_id, item_kind, item_id) VALUES ('tmdb', '6001', 'movie', 6001)"),
+      env.DB.prepare("INSERT INTO enrich_queue (item_kind, item_id) VALUES ('movie', 6001)"),
     ]);
     await env.MEDIA.put("media/6001", "image");
 
     await lib.deleteEntry("media", 6001);
 
     expect(await env.DB.prepare("SELECT id FROM media_items WHERE id = 6001").first()).toBeNull();
-    expect(await env.DB.prepare("SELECT id FROM links WHERE entity_id = 6001").first()).toBeNull();
-    expect(await env.DB.prepare("SELECT id FROM external_ids WHERE entity_id = 6001").first()).toBeNull();
-    expect(await env.DB.prepare("SELECT id FROM enrich_queue WHERE entity_id = 6001").first()).toBeNull();
+    expect(await env.DB.prepare("SELECT id FROM item_sources WHERE item_id = 6001").first()).toBeNull();
+    expect(await env.DB.prepare("SELECT id FROM enrich_queue WHERE item_id = 6001").first()).toBeNull();
     expect(await env.MEDIA.get("media/6001")).toBeNull();
   });
 });

@@ -101,30 +101,17 @@ const items = process.argv.slice(2).flatMap((path) => {
   throw new Error(`unrecognized MAL export: ${path}`);
 }).filter((i) => i.sourceId && i.title);
 
-const values = items.map((i) =>
-  `(${q(i.kind)}, ${q(i.title)}, ${q(normalize(i.title))}, 'myanimelist', ${q(i.sourceId)}, ${q(i.sourceUrl)}, ${q(i.mediaFormat)}, ${q(i.listStatus)}, ${q(i.progressCurrent)}, ${q(i.progressTotal)}, ${q(i.personalScore)}, ${q(i.rating)}, ${q(i.notes)}, ${q(i.tags)})`,
-);
-
-const linkValues = items.map((i) =>
-  `(${q(i.sourceUrl)}, 'myanimelist', ${q(i.kind)}, ${q(i.sourceId)}, ${q(i.kind)}, (SELECT id FROM media_items WHERE source = 'myanimelist' AND kind = ${q(i.kind)} AND source_id = ${q(i.sourceId)}), ${q(i.title)}, 'ok', ${q(JSON.stringify(i))}, 'import')`,
-);
-
-console.log("BEGIN TRANSACTION;");
-if (values.length) {
-  console.log(`INSERT OR IGNORE INTO media_items (kind, title, normalized_title, source, source_id, source_url, media_format, list_status, progress_current, progress_total, personal_score, rating, notes, tags) VALUES\n${values.join(",\n")};`);
-  for (const i of items) {
-    console.log(
-      `UPDATE media_items SET title = ${q(i.title)}, normalized_title = ${q(normalize(i.title))}, source_url = ${q(i.sourceUrl)}, media_format = ${q(i.mediaFormat)}, list_status = ${q(i.listStatus)}, progress_current = ${q(i.progressCurrent)}, progress_total = ${q(i.progressTotal)}, personal_score = ${q(i.personalScore)}, rating = ${q(i.rating)}, notes = ${q(i.notes)}, tags = ${q(i.tags)} WHERE source = 'myanimelist' AND kind = ${q(i.kind)} AND source_id = ${q(i.sourceId)};`,
-    );
-  }
+for (const i of items) {
+  const normalized = normalize(i.title);
+  const sourceItemId = `(SELECT item_id FROM item_sources WHERE provider = 'myanimelist' AND item_kind = ${q(i.kind)} AND provider_id = ${q(i.sourceId)})`;
+  const titleItemId = `(SELECT id FROM media_items WHERE kind = ${q(i.kind)} AND normalized_title = ${q(normalized)} ORDER BY id LIMIT 1)`;
+  const itemId = `COALESCE(${sourceItemId}, ${titleItemId})`;
+  console.log(`INSERT INTO media_items (kind, title, normalized_title, media_format, list_status, progress_current, progress_total, personal_score, rating, notes, tags)
+SELECT ${q(i.kind)}, ${q(i.title)}, ${q(normalized)}, ${q(i.mediaFormat)}, ${q(i.listStatus)}, ${q(i.progressCurrent)}, ${q(i.progressTotal)}, ${q(i.personalScore)}, ${q(i.rating)}, ${q(i.notes)}, ${q(i.tags)}
+WHERE ${sourceItemId} IS NULL AND ${titleItemId} IS NULL;`);
+  console.log(`UPDATE media_items SET title = ${q(i.title)}, normalized_title = ${q(normalized)}, media_format = ${q(i.mediaFormat)}, list_status = ${q(i.listStatus)}, progress_current = ${q(i.progressCurrent)}, progress_total = ${q(i.progressTotal)}, personal_score = ${q(i.personalScore)}, rating = ${q(i.rating)}, notes = ${q(i.notes)}, tags = ${q(i.tags)} WHERE id = ${itemId};`);
+  console.log(`INSERT OR IGNORE INTO item_sources (item_kind, item_id, provider, provider_id, url, title, status, raw_json, saved_at, saved_via)
+VALUES (${q(i.kind)}, ${itemId}, 'myanimelist', ${q(i.sourceId)}, ${q(i.sourceUrl)}, ${q(i.title)}, 'ok', ${q(JSON.stringify(i))}, datetime('now'), 'import');`);
+  console.log(`UPDATE item_sources SET item_id = ${itemId}, url = ${q(i.sourceUrl)}, title = ${q(i.title)}, status = 'ok', raw_json = ${q(JSON.stringify(i))}, saved_at = COALESCE(saved_at, datetime('now')), saved_via = 'import' WHERE provider = 'myanimelist' AND item_kind = ${q(i.kind)} AND provider_id = ${q(i.sourceId)};`);
 }
-if (linkValues.length) {
-  console.log(`INSERT OR IGNORE INTO links (url, source, source_kind, source_id, entity_type, entity_id, title, status, raw_json, saved_via) VALUES\n${linkValues.join(",\n")};`);
-  for (const i of items) {
-    console.log(
-      `UPDATE links SET entity_type = ${q(i.kind)}, entity_id = (SELECT id FROM media_items WHERE source = 'myanimelist' AND kind = ${q(i.kind)} AND source_id = ${q(i.sourceId)}), title = ${q(i.title)}, status = 'ok', raw_json = ${q(JSON.stringify(i))}, saved_via = 'import' WHERE source = 'myanimelist' AND source_kind = ${q(i.kind)} AND source_id = ${q(i.sourceId)};`,
-    );
-  }
-}
-console.log("COMMIT;");
 console.error(`Prepared ${items.length} MAL items`);

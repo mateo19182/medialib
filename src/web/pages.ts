@@ -16,8 +16,11 @@ import type {
   SearchResult,
   TrackDetail,
   TrackRow,
+  YouTubeMigrationStatus,
+  YouTubeSyncPlaylist,
+  YouTubeSyncRun,
 } from "../db/library";
-import type { MediaKind } from "../ingest/types";
+import type { VisualKind } from "../ingest/types";
 
 export type MusicView = "artists" | "albums" | "tracks";
 
@@ -28,6 +31,7 @@ function layout(title: string, body: HtmlEscapedString | Promise<HtmlEscapedStri
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <title>${title}</title>
+        <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
         <link rel="stylesheet" href="/assets/app.css" />
         <script src="/assets/htmx.min.js" defer></script>
       </head>
@@ -44,7 +48,10 @@ function layout(title: string, body: HtmlEscapedString | Promise<HtmlEscapedStri
               <a href="/series" class="hover:text-white">Series</a>
               <a href="/anime" class="hover:text-white">Anime</a>
               <a href="/manga" class="hover:text-white">Manga</a>
+              <a href="/webtoons" class="hover:text-white">Webtoons</a>
+              <a href="/comics" class="hover:text-white">Comics</a>
               <a href="/live" class="hover:text-white">Live</a>
+              <a href="/youtube-sync" class="hover:text-white">Sync</a>
               <a href="https://links.m19182.dev" target="_blank" rel="noopener noreferrer" class="hover:text-white">Links</a>
               <a href="/add" class="hover:text-white">Add</a>
             </div>
@@ -137,6 +144,8 @@ const STAT_LABELS: [keyof LibraryStats, string][] = [
   ["series", "series"],
   ["anime", "anime"],
   ["manga", "manga"],
+  ["webtoons", "webtoons"],
+  ["comics", "comics"],
 ];
 
 export function dashboard(stats: LibraryStats) {
@@ -154,13 +163,130 @@ export function dashboard(stats: LibraryStats) {
     html`
       <div class="mb-8">
         <h1 class="text-3xl font-bold tracking-tight">Your library</h1>
-        <p class="text-slate-500 mt-1">Save music, books, anime, and manga by link.</p>
+        <p class="text-slate-500 mt-1">Save music, books, anime, manga, webtoons, and comics by link.</p>
       </div>
       <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-3">${cards}</div>
       ${stats.pending > 0
         ? html`<p class="text-xs text-amber-600 mb-8">⏳ ${stats.pending} item${stats.pending === 1 ? "" : "s"} enriching in the background…</p>`
         : html`<div class="mb-8"></div>`}
       <a href="https://links.m19182.dev" target="_blank" rel="noopener noreferrer" class="inline-flex text-sm font-medium text-emerald-700 hover:underline">Open Linkwarden</a>
+    `,
+  );
+}
+
+export function migratePage(status: YouTubeMigrationStatus, connected: boolean, message = "") {
+  const total = status.items_total || status.pending;
+  const pct = total ? Math.round((status.items_done / total) * 100) : 0;
+  return layout(
+    "YouTube Music migration · medialib",
+    html`
+      <div class="max-w-3xl">
+        <h1 class="text-2xl font-bold tracking-tight mb-1">YouTube Music migration</h1>
+        <p class="text-slate-500 text-sm mb-6">Move saved tracks into a private YouTube Music playlist.</p>
+        ${message ? html`<div class="bg-emerald-50 border border-emerald-200 text-emerald-800 px-4 py-3 rounded-lg mb-5 text-sm">${message}</div>` : ""}
+        <div class="bg-white border border-slate-200 rounded-xl p-5 space-y-5">
+          <div class="flex flex-wrap items-center gap-3">
+            <span class="inline-flex items-center rounded-lg px-3 py-1.5 text-sm ${connected ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700"}">
+              Google ${connected ? "connected" : "not connected"}
+            </span>
+            <span class="inline-flex items-center rounded-lg px-3 py-1.5 text-sm bg-slate-100 text-slate-700">Status: ${status.status}</span>
+            <span class="inline-flex items-center rounded-lg px-3 py-1.5 text-sm bg-slate-100 text-slate-700">Quota: ${status.quota_used}/9500</span>
+          </div>
+          <div>
+            <div class="flex justify-between text-sm mb-1">
+              <span>${status.items_done}/${total} processed</span>
+              <span>${pct}%</span>
+            </div>
+            <div class="h-2 rounded bg-slate-100 overflow-hidden"><div class="h-full bg-emerald-500" style="width:${pct}%"></div></div>
+          </div>
+          <dl class="grid grid-cols-2 sm:grid-cols-4 gap-3 text-sm">
+            <div><dt class="text-slate-500">Added</dt><dd class="font-semibold">${status.added}</dd></div>
+            <div><dt class="text-slate-500">Skipped</dt><dd class="font-semibold">${status.skipped}</dd></div>
+            <div><dt class="text-slate-500">Failed</dt><dd class="font-semibold">${status.failed}</dd></div>
+            <div><dt class="text-slate-500">Pending</dt><dd class="font-semibold">${status.pending}</dd></div>
+          </dl>
+          ${status.playlist_url ? html`<a href="${status.playlist_url}" target="_blank" rel="noopener noreferrer" class="inline-flex text-sm font-medium text-emerald-700 hover:underline">Open playlist</a>` : ""}
+          ${status.message ? html`<p class="text-sm text-slate-500">${status.message}</p>` : ""}
+          <div class="flex flex-wrap gap-2">
+            <a href="/oauth/google/start" class="bg-slate-900 text-white px-4 py-2 rounded-lg text-sm hover:bg-slate-700">${connected ? "Reconnect Google" : "Connect Google"}</a>
+            <form method="post" action="/migrate/start"><button class="bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm hover:bg-emerald-600" ${connected ? "" : "disabled"}>Start migration</button></form>
+            <form method="post" action="/migrate/run"><button class="border border-slate-200 px-4 py-2 rounded-lg text-sm hover:bg-slate-50" ${connected ? "" : "disabled"}>Run batch now</button></form>
+          </div>
+        </div>
+      </div>
+    `,
+  );
+}
+
+export function youtubeSyncPage(playlists: YouTubeSyncPlaylist[], run: YouTubeSyncRun | null, connected: boolean, message = "") {
+  return layout(
+    "YouTube sync · medialib",
+    html`
+      <div class="max-w-5xl">
+        <div class="flex flex-wrap items-start justify-between gap-3 mb-6">
+          <div>
+            <h1 class="text-2xl font-bold tracking-tight mb-1">YouTube source sync</h1>
+            <p class="text-slate-500 text-sm">Import new music from configured YouTube Music playlists.</p>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            <a href="/oauth/google/start?next=/youtube-sync" class="bg-slate-900 text-white px-4 py-2 rounded-lg text-sm hover:bg-slate-700">${connected ? "Reconnect Google" : "Connect Google"}</a>
+            <form method="post" action="/youtube-sync/run"><button class="bg-emerald-700 text-white px-4 py-2 rounded-lg text-sm hover:bg-emerald-600" ${connected ? "" : "disabled"}>Sync all</button></form>
+          </div>
+        </div>
+        ${message ? html`<div class="bg-emerald-50 border border-emerald-200 text-emerald-800 px-4 py-3 rounded-lg mb-5 text-sm">${message}</div>` : ""}
+        ${run ? html`
+          <div class="bg-white border border-slate-200 rounded-xl p-5 mb-5">
+            <div class="flex flex-wrap items-center gap-3 text-sm">
+              <span class="inline-flex items-center rounded-lg px-3 py-1.5 bg-slate-100 text-slate-700">Last run: ${run.status}</span>
+              <span class="text-slate-500">${run.playlists_done}/${run.playlists_total} playlists</span>
+              <span class="text-slate-500">${run.pages_fetched} pages</span>
+              <span class="text-slate-500">${run.imported} imported</span>
+              <span class="text-slate-500">${run.duplicates} known</span>
+              ${run.failed ? html`<span class="text-red-600">${run.failed} failed</span>` : ""}
+            </div>
+            ${run.message ? html`<p class="text-sm text-slate-500 mt-3">${run.message}</p>` : ""}
+          </div>
+        ` : ""}
+        <form method="post" action="/youtube-sync/playlists" class="bg-white border border-slate-200 rounded-xl p-5 mb-6">
+          <h2 class="font-semibold mb-3">Add playlist</h2>
+          <div class="grid gap-3 md:grid-cols-[1.5fr_1fr_8rem_8rem_auto]">
+            <input name="playlist" required placeholder="Playlist URL or ID" class="border border-slate-200 rounded-lg px-3 py-2 text-sm" />
+            <input name="title" placeholder="Label" class="border border-slate-200 rounded-lg px-3 py-2 text-sm" />
+            <input name="scanLimit" type="number" min="1" max="50" value="3" class="border border-slate-200 rounded-lg px-3 py-2 text-sm" />
+            <input name="stopAfterKnown" type="number" min="1" max="200" value="25" class="border border-slate-200 rounded-lg px-3 py-2 text-sm" />
+            <button class="bg-slate-900 text-white px-4 py-2 rounded-lg text-sm hover:bg-slate-700">Add</button>
+          </div>
+        </form>
+        <div class="space-y-3">
+          ${playlists.length ? playlists.map((playlist) => html`
+            <div class="bg-white border border-slate-200 rounded-xl p-5">
+              <div class="flex flex-wrap items-start justify-between gap-3 mb-4">
+                <div>
+                  <a href="${playlist.url}" target="_blank" rel="noopener noreferrer" class="font-semibold text-emerald-700 hover:underline">${playlist.title}</a>
+                  <div class="text-xs text-slate-500 mt-1">${playlist.playlist_id}</div>
+                  <div class="text-xs mt-1 ${playlist.last_error ? "text-red-600" : "text-slate-500"}">
+                    ${playlist.last_error ? playlist.last_error : playlist.last_sync_at ? `Last sync ${playlist.last_sync_at}` : "Not synced yet"}
+                  </div>
+                </div>
+                <form method="post" action="/youtube-sync/run?playlist=${playlist.id}">
+                  <button class="border border-slate-200 px-3 py-2 rounded-lg text-sm hover:bg-slate-50" ${connected && playlist.enabled ? "" : "disabled"}>Sync</button>
+                </form>
+              </div>
+              <form method="post" action="/youtube-sync/playlists/${playlist.id}" class="grid gap-3 md:grid-cols-[1fr_7rem_7rem_7rem_auto_auto]">
+                <input name="title" value="${playlist.title}" required class="border border-slate-200 rounded-lg px-3 py-2 text-sm" />
+                <label class="inline-flex items-center justify-center gap-2 border border-slate-200 rounded-lg px-3 py-2 text-sm">
+                  <input name="enabled" type="checkbox" value="1" ${playlist.enabled ? "checked" : ""} /> Enabled
+                </label>
+                <input name="scanLimit" type="number" min="1" max="50" value="${playlist.scan_limit}" class="border border-slate-200 rounded-lg px-3 py-2 text-sm" />
+                <input name="stopAfterKnown" type="number" min="1" max="200" value="${playlist.stop_after_known}" class="border border-slate-200 rounded-lg px-3 py-2 text-sm" />
+                <button class="bg-slate-900 text-white px-4 py-2 rounded-lg text-sm hover:bg-slate-700">Save</button>
+                <button form="delete-youtube-playlist-${playlist.id}" class="border border-red-200 text-red-700 px-4 py-2 rounded-lg text-sm hover:bg-red-50">Delete</button>
+              </form>
+              <form id="delete-youtube-playlist-${playlist.id}" method="post" action="/youtube-sync/playlists/${playlist.id}/delete"></form>
+            </div>
+          `) : html`<div class="bg-white border border-slate-200 rounded-xl p-5 text-sm text-slate-500">No playlists configured.</div>`}
+        </div>
+      </div>
     `,
   );
 }
@@ -185,7 +311,7 @@ export function addPage(result?: SaveResult) {
     } else if (result.duplicate) {
       banner = html`<div class="bg-amber-50 border border-amber-200 text-amber-800 px-4 py-3 rounded-lg mb-5 text-sm">Already saved: <strong>${result.title}</strong></div>`;
     } else if (result.status === "ok") {
-      banner = html`<div class="bg-emerald-50 border border-emerald-200 text-emerald-800 px-4 py-3 rounded-lg mb-5 text-sm">Saved <strong>${result.title}</strong> (${result.entityType}).</div>`;
+      banner = html`<div class="bg-emerald-50 border border-emerald-200 text-emerald-800 px-4 py-3 rounded-lg mb-5 text-sm">Saved <strong>${result.title}</strong> (${result.itemKind ?? "link"}).</div>`;
     } else {
       banner = html`<div class="bg-slate-100 border border-slate-200 text-slate-600 px-4 py-3 rounded-lg mb-5 text-sm">Saved the link, but metadata couldn't be fetched${result.error ? `: ${result.error}` : ""}.</div>`;
     }
@@ -194,8 +320,13 @@ export function addPage(result?: SaveResult) {
     "Add · medialib",
     html`
       <div class="max-w-xl">
-        <h1 class="text-2xl font-bold tracking-tight mb-1">Add to your library</h1>
-        <p class="text-slate-500 text-sm mb-6">Add any item by name, or paste a supported link.</p>
+        <div class="flex items-start justify-between gap-4 mb-6">
+          <div>
+            <h1 class="text-2xl font-bold tracking-tight mb-1">Add to your library</h1>
+            <p class="text-slate-500 text-sm">Choose a type, enter its title, then add it.</p>
+          </div>
+          <a href="/live/add" class="shrink-0 border border-emerald-700 px-3 py-2 rounded-lg text-sm font-medium text-emerald-700 hover:bg-emerald-50">Add live show</a>
+        </div>
         ${banner}
         <form method="post" action="/add" class="bg-white border border-slate-200 rounded-xl p-5 space-y-3">
           <div class="grid sm:grid-cols-[10rem_1fr] gap-3">
@@ -203,6 +334,7 @@ export function addPage(result?: SaveResult) {
               <option value="artist">Artist</option><option value="album">Album</option><option value="track">Track</option>
               <option value="book">Book</option><option value="movie">Movie</option><option value="series">Series</option>
               <option value="anime">Anime</option><option value="manga">Manga</option>
+              <option value="webtoon">Webtoon</option><option value="comic">Comic</option>
             </select>
             <input name="title" required placeholder="Title or name" autofocus
               class="border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900/10" />
@@ -219,13 +351,12 @@ export function addPage(result?: SaveResult) {
             class="flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900/10" />
           <button class="bg-slate-900 text-white px-4 py-2 rounded-lg text-sm hover:bg-slate-700">Save</button>
         </form>
-        <a href="/live/add" class="block text-center text-sm text-emerald-700 hover:underline mt-5">+ Add a live show</a>
       </div>
     `,
   );
 }
 
-export interface EditField { name: string; label: string; value?: string | number | null; type?: "text" | "number" | "date" | "select"; options?: Record<string, string>; multiline?: boolean; hint?: string; }
+export interface EditField { name: string; label: string; value?: string | number | null; type?: "text" | "number" | "date" | "select"; options?: Record<string, string>; multiline?: boolean; hint?: string; required?: boolean; }
 
 export function editEntryPage(title: string, back: string, action: string, fields: EditField[], deleteAction?: string) {
   return layout(
@@ -240,7 +371,7 @@ export function editEntryPage(title: string, back: string, action: string, field
               ? html`<select name="${field.name}" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white">
                   ${Object.entries(field.options ?? {}).map(([key, label]) => html`<option value="${key}" ${field.value === key ? "selected" : ""}>${label}</option>`)}
                 </select>`
-            : html`<input name="${field.name}" type="${field.type ?? "text"}" value="${field.value ?? ""}" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" />`}
+            : html`<input name="${field.name}" type="${field.type ?? "text"}" value="${field.value ?? ""}" ${field.required ? "required" : ""} class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" />`}
           ${field.hint ? html`<span class="block mt-1 text-xs font-normal text-slate-500">${field.hint}</span>` : ""}
         </label>`)}
         <button class="bg-slate-900 text-white px-4 py-2 rounded-lg text-sm hover:bg-slate-700">Save changes</button>
@@ -367,14 +498,16 @@ export function booksPage(page: PageResult<BookRow>) {
   return layout("Books · medialib", html`<h1 class="text-2xl font-bold tracking-tight mb-6">Books</h1>${body}${pager(page, "/books")}`);
 }
 
-const MEDIA_LABELS: Record<MediaKind, { title: string; empty: string; fallback: string }> = {
+const MEDIA_LABELS: Record<VisualKind, { title: string; empty: string; fallback: string }> = {
   movie: { title: "Movies", empty: "No movies yet.", fallback: "🎬" },
   series: { title: "Series", empty: "No series yet.", fallback: "▣" },
   anime: { title: "Anime", empty: "No anime yet. Add a MyAnimeList anime link.", fallback: "◉" },
   manga: { title: "Manga", empty: "No manga yet. Add a MyAnimeList manga link.", fallback: "▤" },
+  webtoon: { title: "Webtoons", empty: "No webtoons yet. Add a WEBTOON link or import your saved-list HTML.", fallback: "WT" },
+  comic: { title: "Comics", empty: "No comics yet.", fallback: "CM" },
 };
 
-export function mediaListPage(kind: MediaKind, page: PageResult<MediaRow>) {
+export function mediaListPage(kind: VisualKind, page: PageResult<MediaRow>) {
   const items = page.items;
   const label = MEDIA_LABELS[kind];
   const body = items.length
@@ -398,7 +531,7 @@ export function mediaListPage(kind: MediaKind, page: PageResult<MediaRow>) {
         )}
       </div>`
     : html`<p class="text-slate-500 text-sm">${label.empty} <a class="underline" href="/add">Add a link</a>.</p>`;
-  const path = kind === "movie" ? "/movies" : kind === "series" ? "/series" : `/${kind}`;
+  const path = kind === "movie" ? "/movies" : kind === "series" ? "/series" : kind === "webtoon" ? "/webtoons" : kind === "comic" ? "/comics" : `/${kind}`;
   return layout(`${label.title} · medialib`, html`<h1 class="text-2xl font-bold tracking-tight mb-6">${label.title}</h1>${body}${pager(page, path)}`);
 }
 
@@ -410,7 +543,7 @@ export function mediaItemPage(item: MediaDetail) {
   return layout(
     `${item.title} · medialib`,
     html`
-      <a href="/${item.kind === "movie" ? "movies" : item.kind}" class="text-sm text-slate-500 hover:underline">← ${label.title}</a>
+      <a href="/${item.kind === "movie" ? "movies" : item.kind === "webtoon" ? "webtoons" : item.kind === "comic" ? "comics" : item.kind}" class="text-sm text-slate-500 hover:underline">← ${label.title}</a>
       <div class="flex flex-col sm:flex-row gap-6 mt-3">
         <div class="shrink-0 w-40">
           ${cover
@@ -424,7 +557,7 @@ export function mediaItemPage(item: MediaDetail) {
           ${listMeta ? html`<p class="text-sm text-emerald-700 mt-1">${listMeta}</p>` : ""}
           <div class="flex items-center gap-3 mt-4">
             <span class="text-sm text-slate-600 flex items-center gap-2">Rating ${stars("media", item.id, item.rating)}</span>
-            ${item.source_url ? html`<a href="${item.source_url}" target="_blank" rel="noopener" class="text-sm text-emerald-600 hover:underline">${item.source ?? "source"}</a>` : ""}
+            ${item.provider_url ? html`<a href="${item.provider_url}" target="_blank" rel="noopener" class="text-sm text-emerald-600 hover:underline">${item.provider ?? "source"}</a>` : ""}
           </div>
           ${item.description ? html`<p class="text-sm text-slate-600 mt-5 leading-relaxed">${item.description}</p>` : ""}
           ${item.notes ? html`<p class="text-sm text-slate-600 mt-5 leading-relaxed">${item.notes}</p>` : ""}
@@ -647,7 +780,7 @@ export function searchPage(query: string, results: SearchResult[]) {
     : [
         q
           ? html`<p class="text-sm text-slate-500 px-4 py-3">No matches for "${q}".</p>`
-          : html`<p class="text-sm text-slate-500 px-4 py-3">Search artists, tracks, albums, books, movies, series, anime, and manga.</p>`,
+          : html`<p class="text-sm text-slate-500 px-4 py-3">Search artists, tracks, albums, books, movies, series, anime, manga, webtoons, and comics.</p>`,
       ];
   return layout(
     "Search · medialib",

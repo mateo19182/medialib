@@ -142,7 +142,6 @@ const books = rows
   })
   .filter((book) => book.title && book.sourceId);
 
-console.log("BEGIN TRANSACTION;");
 
 for (const book of books) {
   const match = bookMatch(book);
@@ -187,15 +186,14 @@ VALUES (${idExpr}, (SELECT id FROM authors WHERE normalized_name = ${q(normalize
     ownedCopies: intOrNull(book.row["Owned Copies"]),
   };
   console.log(
-    `INSERT OR IGNORE INTO links (url, source, source_kind, source_id, entity_type, entity_id, title, status, raw_json, saved_via)
-VALUES (${q(book.sourceUrl)}, 'goodreads', 'book', ${q(book.sourceId)}, 'book', ${idExpr}, ${q(book.title)}, 'ok', ${q(JSON.stringify(raw))}, 'import');`,
+    `INSERT OR IGNORE INTO item_sources (item_kind, item_id, provider, provider_id, url, title, status, raw_json, saved_at, saved_via)
+VALUES ('book', ${idExpr}, 'goodreads', ${q(book.sourceId)}, ${q(book.sourceUrl)}, ${q(book.title)}, 'ok', ${q(JSON.stringify(raw))}, datetime('now'), 'import');`,
   );
   console.log(
-    `UPDATE links
-SET url = ${q(book.sourceUrl)}, entity_type = 'book', entity_id = ${idExpr}, title = ${q(book.title)}, status = 'ok', raw_json = ${q(JSON.stringify(raw))}, saved_via = 'import'
-WHERE source = 'goodreads' AND source_kind = 'book' AND source_id = ${q(book.sourceId)};`,
+    `UPDATE item_sources
+SET url = ${q(book.sourceUrl)}, item_id = ${idExpr}, title = ${q(book.title)}, status = 'ok', raw_json = ${q(JSON.stringify(raw))}, saved_at = COALESCE(saved_at, datetime('now')), saved_via = 'import'
+WHERE provider = 'goodreads' AND item_kind = 'book' AND provider_id = ${q(book.sourceId)};`,
   );
 }
 
-console.log("COMMIT;");
 console.error(`Prepared ${books.length} Goodreads books`);

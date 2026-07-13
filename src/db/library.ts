@@ -1,14 +1,17 @@
 import type { Env, LibraryStats } from "../types";
 import { classify, fetchMetadata } from "../ingest";
 import type { Fetched } from "../ingest";
-import type { ArtistType, Classified, FetchedBook, FetchedMedia, MediaKind } from "../ingest/types";
+import type { ArtistType, Classified, FetchedBook, FetchedVisual, ItemKind, Provider, VisualKind } from "../ingest/types";
 import { normalize, splitArtists } from "../util";
 import * as mb from "../enrich/musicbrainz";
 import { enrichBook } from "../enrich/openlibrary";
-import { findDeezerAlbum, findDeezerArtist, findJikanMedia, findTmdbMedia } from "../enrich/visual";
+import { findDeezerAlbum, findDeezerArtist, findJikanMedia, findTmdbMedia, isVisualKind } from "../enrich/visual";
 import { cacheImage } from "../r2";
 import { isTextAddKind, resolveText, type TextAddKind } from "../ingest/text";
 import type { LiveShow } from "../live-shows";
+import { videoToTrack } from "../ingest/youtube";
+
+export type TelegramAddMode = TextAddKind | "live";
 
 const MAX_ATTEMPTS = 3;
 
@@ -19,13 +22,14 @@ const parseStringList = (value: unknown): string[] => {
 };
 const ARTIST_TYPE_SET = new Set<ArtistType>(["musician", "visual_artist", "filmmaker", "writer", "performer", "other"]);
 const artistType = (value: unknown): ArtistType => ARTIST_TYPE_SET.has(value as ArtistType) ? value as ArtistType : "musician";
+const youtubeMusicPlaylistUrl = (playlistId: string) => `https://music.youtube.com/playlist?list=${encodeURIComponent(playlistId)}`;
 
 export interface SaveResult {
   ok: boolean;
   duplicate?: boolean;
   linkId?: number;
   status?: string;
-  entityType?: string | null;
+  itemKind?: ItemKind | null;
   title?: string;
   error?: string;
 }
@@ -50,9 +54,8 @@ export interface ArtistSummary {
 export interface RecentLink {
   id: number;
   url: string;
-  source: string;
-  source_kind: string | null;
-  entity_type: string | null;
+  provider: string;
+  item_kind: ItemKind | null;
   title: string | null;
   status: string;
   saved_at: string;
@@ -145,7 +148,7 @@ export interface BookRow {
 
 export interface MediaRow {
   id: number;
-  kind: MediaKind;
+  kind: VisualKind;
   title: string;
   cover_url: string | null;
   cover_key: string | null;
@@ -159,9 +162,8 @@ export interface MediaRow {
 }
 
 export interface MediaDetail extends MediaRow {
-  source: string | null;
-  source_id: string | null;
-  source_url: string | null;
+  provider: string | null;
+  provider_url: string | null;
   description: string | null;
   notes: string | null;
   tags: string | null;
@@ -186,6 +188,88 @@ export interface PageResult<T> {
   limit: number;
   offset: number;
 }
+
+export interface OAuthTokenRow {
+  provider: string;
+  access_token: string;
+  refresh_token: string | null;
+  expires_at: number;
+  scope: string | null;
+}
+
+export interface YouTubeMigrationStatus {
+  status: string;
+  playlist_id: string | null;
+  playlist_url: string | null;
+  items_total: number;
+  items_done: number;
+  added: number;
+  skipped: number;
+  failed: number;
+  pending: number;
+  quota_day: string | null;
+  quota_used: number;
+  message: string | null;
+  started_at: string | null;
+  updated_at: string | null;
+  finished_at: string | null;
+}
+
+export interface YouTubeMigrationTrack {
+  track_id: number;
+  query: string;
+  title: string;
+  artists: string;
+}
+
+export interface OAuthState {
+  valid: boolean;
+  returnTo: string | null;
+}
+
+export interface YouTubeSyncPlaylist {
+  id: number;
+  playlist_id: string;
+  title: string;
+  url: string;
+  enabled: number;
+  scan_limit: number;
+  stop_after_known: number;
+  last_sync_at: string | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface YouTubeSyncRun {
+  id: number;
+  status: string;
+  mode: string;
+  playlists_total: number;
+  playlists_done: number;
+  pages_fetched: number;
+  items_seen: number;
+  imported: number;
+  duplicates: number;
+  skipped: number;
+  failed: number;
+  message: string | null;
+  started_at: string;
+  finished_at: string | null;
+}
+
+export interface SyncedYouTubeVideo {
+  videoId: string;
+  title: string;
+  channelTitle?: string;
+  thumbnailUrl?: string;
+  playlistId: string;
+  playlistItemId: string;
+  position?: number | null;
+  rawJson?: unknown;
+}
+
+type SaveVia = "web" | "telegram" | "linkwarden" | "youtube-sync";
 
 type SqlValue = string | number | null;
 type ImportArtist = { id: number; name: string; normalized_name: string; artist_type?: ArtistType | null; mbid?: string | null; image_url?: string | null; genres?: string | null };
@@ -258,15 +342,456 @@ export class LibraryDb {
       (SELECT COUNT(*) FROM media_items WHERE kind = 'series') AS series,
       (SELECT COUNT(*) FROM media_items WHERE kind = 'anime') AS anime,
       (SELECT COUNT(*) FROM media_items WHERE kind = 'manga') AS manga,
-      (SELECT COUNT(*) FROM links) AS links,
+      (SELECT COUNT(*) FROM media_items WHERE kind = 'webtoon') AS webtoons,
+      (SELECT COUNT(*) FROM media_items WHERE kind = 'comic') AS comics,
+      (SELECT COUNT(*) FROM item_sources WHERE saved_at IS NOT NULL) AS links,
       (SELECT COUNT(*) FROM enrich_queue) AS pending`);
-    return row ?? { tracks: 0, artists: 0, albums: 0, books: 0, movies: 0, series: 0, anime: 0, manga: 0, links: 0, pending: 0 };
+    return row ?? { tracks: 0, artists: 0, albums: 0, books: 0, movies: 0, series: 0, anime: 0, manga: 0, webtoons: 0, comics: 0, links: 0, pending: 0 };
   }
 
   recent(limit = 20): Promise<RecentLink[]> {
     return this.all<RecentLink>(
-      "SELECT id, url, source, source_kind, entity_type, title, status, saved_at, saved_via FROM links ORDER BY saved_at DESC, id DESC LIMIT ?",
+      `SELECT id, url, provider, item_kind, title, status, saved_at, saved_via
+       FROM item_sources WHERE saved_at IS NOT NULL ORDER BY saved_at DESC, id DESC LIMIT ?`,
       [limit],
+    );
+  }
+
+  // --- OAuth + YouTube Music migration ------------------------------------
+
+  async createOAuthState(provider: string, state: string, returnTo = "/migrate"): Promise<void> {
+    await this.run(
+      "INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)",
+      [`oauth_state:${provider}:${state}`, JSON.stringify({ createdAt: Date.now(), returnTo })],
+    );
+  }
+
+  async consumeOAuthState(provider: string, state: string): Promise<OAuthState> {
+    const key = `oauth_state:${provider}:${state}`;
+    const row = await this.first<{ value: string }>("SELECT value FROM kv WHERE key = ?", [key]);
+    await this.run("DELETE FROM kv WHERE key = ?", [key]);
+    if (!row) return { valid: false, returnTo: null };
+    let created = Number(row.value);
+    let returnTo: string | null = null;
+    if (!Number.isFinite(created)) {
+      try {
+        const parsed = JSON.parse(row.value) as { createdAt?: unknown; returnTo?: unknown };
+        created = Number(parsed.createdAt);
+        returnTo = typeof parsed.returnTo === "string" ? parsed.returnTo : null;
+      } catch {
+        created = NaN;
+      }
+    }
+    return { valid: Number.isFinite(created) && Date.now() - created < 30 * 60 * 1000, returnTo };
+  }
+
+  getOAuthToken(provider: string): Promise<OAuthTokenRow | null> {
+    return this.first<OAuthTokenRow>(
+      "SELECT provider, access_token, refresh_token, expires_at, scope FROM oauth_tokens WHERE provider = ?",
+      [provider],
+    );
+  }
+
+  async saveOAuthToken(
+    provider: string,
+    token: { accessToken: string; refreshToken?: string | null; expiresAt: number; scope?: string | null },
+  ): Promise<void> {
+    await this.run(
+      `INSERT INTO oauth_tokens (provider, access_token, refresh_token, expires_at, scope, updated_at)
+       VALUES (?, ?, ?, ?, ?, datetime('now'))
+       ON CONFLICT(provider) DO UPDATE SET
+         access_token = excluded.access_token,
+         refresh_token = COALESCE(excluded.refresh_token, oauth_tokens.refresh_token),
+         expires_at = excluded.expires_at,
+         scope = COALESCE(excluded.scope, oauth_tokens.scope),
+         updated_at = datetime('now')`,
+      [provider, token.accessToken, token.refreshToken ?? null, token.expiresAt, token.scope ?? null],
+    );
+  }
+
+  async youtubeMigrationStatus(): Promise<YouTubeMigrationStatus> {
+    const row = await this.first<Omit<YouTubeMigrationStatus, "pending">>(
+      `SELECT status, playlist_id, playlist_url, items_total, items_done, added, skipped, failed,
+              quota_day, quota_used, message, started_at, updated_at, finished_at
+       FROM youtube_migration WHERE id = 1`,
+    );
+    if (!row) {
+      const tracks = Number(await this.scalar("SELECT COUNT(*) AS value FROM tracks"));
+      return {
+        status: "idle",
+        playlist_id: null,
+        playlist_url: null,
+        items_total: tracks,
+        items_done: 0,
+        added: 0,
+        skipped: 0,
+        failed: 0,
+        pending: tracks,
+        quota_day: null,
+        quota_used: 0,
+        message: null,
+        started_at: null,
+        updated_at: null,
+        finished_at: null,
+      };
+    }
+    return { ...row, pending: Math.max(0, Number(row.items_total) - Number(row.items_done)) };
+  }
+
+  async startYoutubeMigration(reset = false): Promise<YouTubeMigrationStatus> {
+    if (reset) {
+      await this.env.DB.batch([
+        this.stmt("DELETE FROM youtube_migration_items"),
+        this.stmt("DELETE FROM youtube_migration WHERE id = 1"),
+      ]);
+    }
+    await this.run(
+      `INSERT OR IGNORE INTO youtube_migration (id, status, started_at, updated_at)
+       VALUES (1, 'running', datetime('now'), datetime('now'))`,
+    );
+    await this.run(
+      `WITH track_rows AS (
+         SELECT t.id AS track_id,
+                t.title,
+                COALESCE(
+                  (SELECT group_concat(name, ', ')
+                   FROM (
+                     SELECT ar.name
+                     FROM track_artists ta
+                     JOIN artists ar ON ar.id = ta.artist_id
+                     WHERE ta.track_id = t.id
+                     ORDER BY ta.position, ar.name COLLATE NOCASE
+                   )),
+                  a.name,
+                  'Unknown artist'
+                ) AS artists
+         FROM tracks t
+         LEFT JOIN artists a ON a.id = t.artist_id
+       )
+       INSERT OR IGNORE INTO youtube_migration_items (track_id, status, query, title, artists)
+       SELECT track_id, 'pending', artists || ' - ' || title, title, artists
+       FROM track_rows
+       ORDER BY track_id`,
+    );
+    await this.run(
+      `UPDATE youtube_migration
+       SET status = CASE WHEN (SELECT COUNT(*) FROM youtube_migration_items WHERE status NOT IN ('added', 'skipped', 'error')) = 0 THEN 'done' ELSE 'running' END,
+           started_at = COALESCE(started_at, datetime('now')),
+           finished_at = CASE WHEN (SELECT COUNT(*) FROM youtube_migration_items WHERE status NOT IN ('added', 'skipped', 'error')) = 0 THEN COALESCE(finished_at, datetime('now')) ELSE NULL END,
+           message = 'Migration queued',
+           updated_at = datetime('now')
+       WHERE id = 1`,
+    );
+    await this.refreshYoutubeMigrationCounts();
+    return this.youtubeMigrationStatus();
+  }
+
+  async youtubePendingMigrationTracks(limit = 5): Promise<YouTubeMigrationTrack[]> {
+    return this.all<YouTubeMigrationTrack>(
+      `SELECT track_id, query, title, artists
+       FROM youtube_migration_items
+       WHERE status = 'pending'
+       ORDER BY track_id
+       LIMIT ?`,
+      [Math.max(1, Math.min(25, Math.floor(limit)))],
+    );
+  }
+
+  async setYoutubeMigrationPlaylist(playlistId: string): Promise<void> {
+    await this.run(
+      `UPDATE youtube_migration
+       SET playlist_id = ?, playlist_url = ?, status = 'running', message = 'Playlist created', updated_at = datetime('now')
+       WHERE id = 1`,
+      [playlistId, `https://music.youtube.com/playlist?list=${playlistId}`],
+    );
+  }
+
+  async reserveYoutubeQuota(units: number, day: string, maxUnits = 9500): Promise<boolean> {
+    await this.run("INSERT OR IGNORE INTO youtube_migration (id, status, started_at, updated_at) VALUES (1, 'running', datetime('now'), datetime('now'))");
+    const row = await this.first<{ quota_day: string | null; quota_used: number }>("SELECT quota_day, quota_used FROM youtube_migration WHERE id = 1");
+    const used = row?.quota_day === day ? Number(row.quota_used) : 0;
+    if (used + units > maxUnits) {
+      await this.run(
+        "UPDATE youtube_migration SET quota_day = ?, quota_used = ?, message = ?, updated_at = datetime('now') WHERE id = 1",
+        [day, used, "Daily YouTube quota budget reached; will resume tomorrow."],
+      );
+      return false;
+    }
+    await this.run("UPDATE youtube_migration SET quota_day = ?, quota_used = ?, updated_at = datetime('now') WHERE id = 1", [day, used + units]);
+    return true;
+  }
+
+  async markYoutubeMigrationItem(
+    trackId: number,
+    result: { status: "pending" | "added" | "skipped" | "error"; videoId?: string | null; videoTitle?: string | null; error?: string | null },
+  ): Promise<void> {
+    await this.run(
+      `UPDATE youtube_migration_items
+       SET status = ?, video_id = ?, video_title = ?, error = ?, added_at = CASE WHEN ? = 'added' THEN datetime('now') ELSE added_at END,
+           updated_at = datetime('now')
+       WHERE track_id = ?`,
+      [result.status, result.videoId ?? null, result.videoTitle ?? null, result.error?.slice(0, 500) ?? null, result.status, trackId],
+    );
+    await this.refreshYoutubeMigrationCounts(result.error ?? null);
+  }
+
+  async noteYoutubeMigration(message: string): Promise<void> {
+    await this.run("UPDATE youtube_migration SET message = ?, updated_at = datetime('now') WHERE id = 1", [message.slice(0, 500)]);
+  }
+
+  private async refreshYoutubeMigrationCounts(message: string | null = null): Promise<void> {
+    await this.run(
+      `UPDATE youtube_migration
+       SET items_total = (SELECT COUNT(*) FROM youtube_migration_items),
+           items_done = (SELECT COUNT(*) FROM youtube_migration_items WHERE status IN ('added', 'skipped', 'error')),
+           added = (SELECT COUNT(*) FROM youtube_migration_items WHERE status = 'added'),
+           skipped = (SELECT COUNT(*) FROM youtube_migration_items WHERE status = 'skipped'),
+           failed = (SELECT COUNT(*) FROM youtube_migration_items WHERE status = 'error'),
+           status = CASE
+             WHEN (SELECT COUNT(*) FROM youtube_migration_items) = 0 THEN 'done'
+             WHEN (SELECT COUNT(*) FROM youtube_migration_items WHERE status NOT IN ('added', 'skipped', 'error')) = 0 THEN 'done'
+             ELSE 'running'
+           END,
+           finished_at = CASE
+             WHEN (SELECT COUNT(*) FROM youtube_migration_items WHERE status NOT IN ('added', 'skipped', 'error')) = 0 THEN COALESCE(finished_at, datetime('now'))
+             ELSE NULL
+           END,
+           message = COALESCE(?, message),
+           updated_at = datetime('now')
+       WHERE id = 1`,
+      [message],
+    );
+  }
+
+  // --- YouTube source sync -------------------------------------------------
+
+  listYoutubeSyncPlaylists(): Promise<YouTubeSyncPlaylist[]> {
+    return this.all<YouTubeSyncPlaylist>(
+      `SELECT id, playlist_id, title, url, enabled, scan_limit, stop_after_known,
+              last_sync_at, last_error, created_at, updated_at
+       FROM youtube_sync_playlists
+       ORDER BY enabled DESC, title COLLATE NOCASE, id`,
+    );
+  }
+
+  youtubeSyncPlaylist(id: number): Promise<YouTubeSyncPlaylist | null> {
+    return this.first<YouTubeSyncPlaylist>(
+      `SELECT id, playlist_id, title, url, enabled, scan_limit, stop_after_known,
+              last_sync_at, last_error, created_at, updated_at
+       FROM youtube_sync_playlists
+       WHERE id = ?`,
+      [id],
+    );
+  }
+
+  enabledYoutubeSyncPlaylists(id?: number): Promise<YouTubeSyncPlaylist[]> {
+    return this.all<YouTubeSyncPlaylist>(
+      `SELECT id, playlist_id, title, url, enabled, scan_limit, stop_after_known,
+              last_sync_at, last_error, created_at, updated_at
+       FROM youtube_sync_playlists
+       WHERE enabled = 1 AND (? IS NULL OR id = ?)
+       ORDER BY id`,
+      [id ?? null, id ?? null],
+    );
+  }
+
+  async upsertYoutubeSyncPlaylist(input: { playlistId: string; title?: string; enabled?: boolean; scanLimit?: number; stopAfterKnown?: number }): Promise<void> {
+    const title = input.title?.trim() || input.playlistId;
+    const scanLimit = Math.max(1, Math.min(50, Math.floor(input.scanLimit ?? 3)));
+    const stopAfterKnown = Math.max(1, Math.min(200, Math.floor(input.stopAfterKnown ?? 25)));
+    await this.run(
+      `INSERT INTO youtube_sync_playlists (playlist_id, title, url, enabled, scan_limit, stop_after_known, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+       ON CONFLICT(playlist_id) DO UPDATE SET
+         title = excluded.title,
+         url = excluded.url,
+         enabled = excluded.enabled,
+         scan_limit = excluded.scan_limit,
+         stop_after_known = excluded.stop_after_known,
+         updated_at = datetime('now')`,
+      [input.playlistId, title, youtubeMusicPlaylistUrl(input.playlistId), input.enabled === false ? 0 : 1, scanLimit, stopAfterKnown],
+    );
+  }
+
+  async updateYoutubeSyncPlaylist(id: number, input: { title: string; enabled: boolean; scanLimit?: number; stopAfterKnown?: number }): Promise<void> {
+    const title = input.title.trim();
+    if (!title) throw new Error("Playlist title is required");
+    await this.run(
+      `UPDATE youtube_sync_playlists
+       SET title = ?, enabled = ?, scan_limit = ?, stop_after_known = ?, updated_at = datetime('now')
+       WHERE id = ?`,
+      [
+        title,
+        input.enabled ? 1 : 0,
+        Math.max(1, Math.min(50, Math.floor(input.scanLimit ?? 3))),
+        Math.max(1, Math.min(200, Math.floor(input.stopAfterKnown ?? 25))),
+        id,
+      ],
+    );
+  }
+
+  async deleteYoutubeSyncPlaylist(id: number): Promise<void> {
+    const playlist = await this.youtubeSyncPlaylist(id);
+    if (!playlist) return;
+    await this.env.DB.batch([
+      this.stmt("DELETE FROM youtube_sync_items WHERE playlist_id = ?", [playlist.playlist_id]),
+      this.stmt("DELETE FROM youtube_sync_playlists WHERE id = ?", [id]),
+    ]);
+  }
+
+  recentYoutubeSyncRun(): Promise<YouTubeSyncRun | null> {
+    return this.first<YouTubeSyncRun>(
+      `SELECT id, status, mode, playlists_total, playlists_done, pages_fetched, items_seen,
+              imported, duplicates, skipped, failed, message, started_at, finished_at
+       FROM youtube_sync_runs
+       ORDER BY id DESC
+       LIMIT 1`,
+    );
+  }
+
+  async startYoutubeSyncRun(playlistsTotal: number, mode = "incremental"): Promise<number> {
+    return Number(await this.scalar(
+      `INSERT INTO youtube_sync_runs (status, mode, playlists_total, message)
+       VALUES ('running', ?, ?, 'Sync started')
+       RETURNING id AS value`,
+      [mode, playlistsTotal],
+    ));
+  }
+
+  async noteYoutubeSyncRun(
+    runId: number,
+    delta: Partial<Pick<YouTubeSyncRun, "playlists_done" | "pages_fetched" | "items_seen" | "imported" | "duplicates" | "skipped" | "failed">> & { message?: string | null; done?: boolean },
+  ): Promise<void> {
+    await this.run(
+      `UPDATE youtube_sync_runs
+       SET playlists_done = playlists_done + ?,
+           pages_fetched = pages_fetched + ?,
+           items_seen = items_seen + ?,
+           imported = imported + ?,
+           duplicates = duplicates + ?,
+           skipped = skipped + ?,
+           failed = failed + ?,
+           message = COALESCE(?, message),
+           status = CASE WHEN ? THEN CASE WHEN failed + ? > 0 THEN 'done_with_errors' ELSE 'done' END ELSE status END,
+           finished_at = CASE WHEN ? THEN datetime('now') ELSE finished_at END
+       WHERE id = ?`,
+      [
+        delta.playlists_done ?? 0,
+        delta.pages_fetched ?? 0,
+        delta.items_seen ?? 0,
+        delta.imported ?? 0,
+        delta.duplicates ?? 0,
+        delta.skipped ?? 0,
+        delta.failed ?? 0,
+        delta.message?.slice(0, 500) ?? null,
+        delta.done ? 1 : 0,
+        delta.failed ?? 0,
+        delta.done ? 1 : 0,
+        runId,
+      ],
+    );
+  }
+
+  async noteYoutubeSyncPlaylist(id: number, result: { ok: boolean; error?: string | null }): Promise<void> {
+    await this.run(
+      `UPDATE youtube_sync_playlists
+       SET last_sync_at = CASE WHEN ? THEN datetime('now') ELSE last_sync_at END,
+           last_error = ?,
+           updated_at = datetime('now')
+       WHERE id = ?`,
+      [result.ok ? 1 : 0, result.error?.slice(0, 500) ?? null, id],
+    );
+  }
+
+  async existingYoutubeSyncPlaylistItems(playlistId: string, playlistItemIds: string[]): Promise<Set<string>> {
+    const ids = playlistItemIds.filter(Boolean);
+    if (!ids.length) return new Set();
+    const placeholders = ids.map(() => "?").join(", ");
+    const rows = await this.all<{ playlist_item_id: string }>(
+      `SELECT playlist_item_id
+       FROM youtube_sync_items
+       WHERE playlist_id = ? AND playlist_item_id IN (${placeholders})`,
+      [playlistId, ...ids],
+    );
+    return new Set(rows.map((row) => row.playlist_item_id));
+  }
+
+  async saveSyncedYouTubeVideo(input: SyncedYouTubeVideo): Promise<{ sourceId: number; duplicate: boolean; itemKind: ItemKind; itemId: number; title: string }> {
+    const url = `https://www.youtube.com/watch?v=${input.videoId}`;
+    const existing = await this.first<{ id: number; title: string | null; item_kind: ItemKind | null; item_id: number | null; saved_at: string | null }>(
+      "SELECT id, title, item_kind, item_id, saved_at FROM item_sources WHERE provider = 'youtube' AND item_kind = 'track' AND provider_id = ?",
+      [input.videoId],
+    );
+    if (existing?.saved_at && existing.item_kind === "track" && existing.item_id !== null) {
+      await this.recordYoutubeSyncItem(input, existing.id, "track", existing.item_id);
+      return { sourceId: existing.id, duplicate: true, itemKind: "track", itemId: existing.item_id, title: existing.title ?? input.title };
+    }
+
+    const fetched = videoToTrack(input.title, input.channelTitle, input.thumbnailUrl);
+    const up = await this.upsertEntity(fetched);
+    await this.enqueueEnrich(up.itemKind, up.itemId);
+    await this.enqueueRelated(up.itemKind, up.itemId);
+    const rawJson = JSON.stringify(input.rawJson ?? { title: input.title, channelTitle: input.channelTitle });
+
+    let sourceId: number;
+    if (existing) {
+      sourceId = existing.id;
+      await this.run(
+        `UPDATE item_sources
+         SET item_id = ?, url = ?, title = ?, status = 'ok', raw_json = ?,
+             saved_at = COALESCE(saved_at, datetime('now')), saved_via = COALESCE(saved_via, 'youtube-sync')
+         WHERE id = ?`,
+        [up.itemId, url, up.title, rawJson, sourceId],
+      );
+    } else {
+      const saved = await this.saveItemSource({
+        provider: "youtube",
+        providerId: input.videoId,
+        itemKind: up.itemKind,
+        itemId: up.itemId,
+        url,
+        title: up.title,
+        status: "ok",
+        rawJson,
+        savedVia: "youtube-sync",
+      });
+      sourceId = saved.id;
+    }
+
+    await this.recordYoutubeSyncItem(input, sourceId, up.itemKind, up.itemId);
+    return { sourceId, duplicate: !!existing?.saved_at, itemKind: up.itemKind, itemId: up.itemId, title: up.title };
+  }
+
+  private async recordYoutubeSyncItem(input: SyncedYouTubeVideo, sourceId: number, itemKind: ItemKind, itemId: number): Promise<void> {
+    await this.run(
+      `INSERT INTO youtube_sync_items (
+         playlist_id, playlist_item_id, video_id, item_source_id, item_kind, item_id,
+         title, channel_title, position, raw_json, first_seen_at, last_seen_at, removed_at
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), NULL)
+       ON CONFLICT(playlist_id, playlist_item_id) DO UPDATE SET
+         video_id = excluded.video_id,
+         item_source_id = excluded.item_source_id,
+         item_kind = excluded.item_kind,
+         item_id = excluded.item_id,
+         title = excluded.title,
+         channel_title = excluded.channel_title,
+         position = excluded.position,
+         raw_json = excluded.raw_json,
+         last_seen_at = datetime('now'),
+         removed_at = NULL`,
+      [
+        input.playlistId,
+        input.playlistItemId,
+        input.videoId,
+        sourceId,
+        itemKind,
+        itemId,
+        input.title,
+        input.channelTitle ?? null,
+        input.position ?? null,
+        JSON.stringify(input.rawJson ?? {}),
+      ],
     );
   }
 
@@ -498,8 +1023,8 @@ export class LibraryDb {
     );
   }
 
-  /** Visual media by category, for /movies, /series, /anime, /manga. */
-  listMedia(kind: MediaKind, limit = 50, offset = 0): Promise<PageResult<MediaRow>> {
+  /** Visual media by category, for /movies, /series, /anime, /manga, /webtoons, /comics. */
+  listMedia(kind: VisualKind, limit = 50, offset = 0): Promise<PageResult<MediaRow>> {
     return this.page<MediaRow>(
       `SELECT id, kind, title, cover_url, cover_key, year, rating,
               media_format, list_status, progress_current, progress_total, personal_score
@@ -510,9 +1035,11 @@ export class LibraryDb {
 
   mediaDetail(id: number): Promise<MediaDetail | null> {
     return this.first<MediaDetail>(
-      `SELECT id, kind, title, source, source_id, source_url, cover_url, cover_key, year, description, rating,
+      `SELECT media.id, media.kind, media.title, media.cover_url, media.cover_key, media.year, media.description, media.rating,
+              (SELECT provider FROM item_sources WHERE item_kind = media.kind AND item_id = media.id ORDER BY is_primary DESC, saved_at DESC LIMIT 1) AS provider,
+              (SELECT url FROM item_sources WHERE item_kind = media.kind AND item_id = media.id ORDER BY is_primary DESC, saved_at DESC LIMIT 1) AS provider_url,
               media_format, list_status, progress_current, progress_total, personal_score, notes, tags
-       FROM media_items WHERE id = ?`,
+       FROM media_items AS media WHERE media.id = ?`,
       [id],
     );
   }
@@ -617,8 +1144,8 @@ export class LibraryDb {
   async deleteEntry(kind: "artist" | "album" | "track" | "book" | "media", id: number): Promise<void> {
     const table = { artist: "artists", album: "albums", track: "tracks", book: "books", media: "media_items" }[kind];
     const imageColumn = kind === "artist" ? "image_key" : kind === "album" || kind === "book" || kind === "media" ? "cover_key" : null;
-    const row = await this.first<{ image_key: string | null; entity_type: string }>(
-      `SELECT ${imageColumn ? imageColumn : "NULL"} AS image_key, ${kind === "media" ? "kind" : `'${kind}'`} AS entity_type FROM ${table} WHERE id = ?`,
+    const row = await this.first<{ image_key: string | null; item_kind: ItemKind }>(
+      `SELECT ${imageColumn ? imageColumn : "NULL"} AS image_key, ${kind === "media" ? "kind" : `'${kind}'`} AS item_kind FROM ${table} WHERE id = ?`,
       [id],
     );
     if (!row) return;
@@ -635,9 +1162,8 @@ export class LibraryDb {
     if (kind === "track") statements.push(this.stmt("DELETE FROM track_artists WHERE track_id = ?", [id]));
     if (kind === "book") statements.push(this.stmt("DELETE FROM book_authors WHERE book_id = ?", [id]));
     statements.push(
-      this.stmt("DELETE FROM links WHERE entity_type = ? AND entity_id = ?", [row.entity_type, id]),
-      this.stmt("DELETE FROM external_ids WHERE entity_type = ? AND entity_id = ?", [row.entity_type, id]),
-      this.stmt("DELETE FROM enrich_queue WHERE entity_type = ? AND entity_id = ?", [kind === "media" ? "media" : kind, id]),
+      this.stmt("DELETE FROM item_sources WHERE item_kind = ? AND item_id = ?", [row.item_kind, id]),
+      this.stmt("DELETE FROM enrich_queue WHERE item_kind = ? AND item_id = ?", [row.item_kind, id]),
       this.stmt(`DELETE FROM ${table} WHERE id = ?`, [id]),
     );
     await this.env.DB.batch(statements);
@@ -657,7 +1183,7 @@ export class LibraryDb {
     else await this.run("INSERT INTO live_shows (artist, date, date_label, venue, city, context, companions, summary, notes_json, tags_json, slug) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", values);
   }
 
-  /** Fuzzy search across music, books, movies, series, anime, and manga. */
+  /** Fuzzy search across music, books, and visual media. */
   async search(query: string, limit = 10): Promise<SearchResult[]> {
     const like = `%${normalize(query)}%`;
     if (like === "%%") return [];
@@ -695,21 +1221,21 @@ export class LibraryDb {
   // --- ingestion -----------------------------------------------------------
 
   /** Save a link: classify -> dedupe -> fetch metadata -> upsert -> record. */
-  async saveLink(url: string, via: "web" | "telegram" | "linkwarden" = "web"): Promise<SaveResult> {
+  async saveLink(url: string, via: SaveVia = "web"): Promise<SaveResult> {
     const c = classify(url);
     if (!c) return { ok: false, error: "Unrecognized link" };
 
-    const existing = await this.first<{ id: number; title: string | null; status: string; entity_type: string | null }>(
-      "SELECT id, title, status, entity_type FROM links WHERE source = ? AND source_kind = ? AND source_id = ?",
-      [c.source, c.kind, c.sourceId],
+    const existing = await this.first<{ id: number; title: string | null; status: string; item_kind: ItemKind | null; saved_at: string | null }>(
+      "SELECT id, title, status, item_kind, saved_at FROM item_sources WHERE provider = ? AND item_kind IS ? AND provider_id = ?",
+      [c.provider, c.itemKind, c.providerId],
     );
-    if (existing) {
+    if (existing?.saved_at) {
       return {
         ok: true,
         duplicate: true,
         linkId: existing.id,
         status: existing.status,
-        entityType: existing.entity_type,
+        itemKind: existing.item_kind,
         title: existing.title ?? url,
       };
     }
@@ -722,42 +1248,28 @@ export class LibraryDb {
       error = e instanceof Error ? e.message : String(e);
     }
 
-    let entityType: string | null = null;
-    let entityId: number | null = null;
+    let itemKind = c.itemKind;
+    let itemId: number | null = null;
     let title = url;
     if (fetched) {
-      const up = await this.upsertEntity(fetched, c);
-      entityType = up.entityType;
-      entityId = up.entityId;
+      const up = await this.upsertEntity(fetched);
+      itemKind = up.itemKind;
+      itemId = up.itemId;
       title = up.title;
-      await this.enqueueEnrich(up.enrichType ?? entityType, entityId);
-      await this.enqueueRelated(entityType, entityId);
+      await this.enqueueEnrich(itemKind, itemId);
+      await this.enqueueRelated(itemKind, itemId);
     }
     const status = fetched ? "ok" : error ? "error" : "pending";
 
-    let linkId: number;
-    try {
-      linkId = Number(
-        await this.scalar(
-          `INSERT INTO links (url, source, source_kind, source_id, entity_type, entity_id, title, status, raw_json, saved_via)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id AS value`,
-          [url, c.source, c.kind, c.sourceId, entityType, entityId, title, status, JSON.stringify(fetched ?? (error ? { error } : {})), via],
-        ),
-      );
-    } catch {
-      // Lost a race on the UNIQUE(source, source_kind, source_id) constraint — treat as dup.
-      const dup = await this.first<{ id: number; title: string | null; status: string }>(
-        "SELECT id, title, status FROM links WHERE source = ? AND source_kind = ? AND source_id = ?",
-        [c.source, c.kind, c.sourceId],
-      );
-      return { ok: true, duplicate: true, linkId: dup?.id, status: dup?.status, title: dup?.title ?? url };
-    }
-
-    return { ok: true, linkId, status, entityType, title, error };
+    const saved = await this.saveItemSource({
+      provider: c.provider, providerId: c.providerId, itemKind, itemId, url, title, status,
+      rawJson: JSON.stringify(fetched ?? (error ? { error } : {})), savedVia: via,
+    });
+    return { ok: true, duplicate: saved.duplicate, linkId: saved.id, status, itemKind, title, error };
   }
 
   /** Save a name entered by a user, resolving it against a public catalogue when possible. */
-  async saveText(kind: TextAddKind, text: string, via: "web" | "telegram" = "telegram", creator = "", inputArtistType: ArtistType = "musician"): Promise<SaveResult> {
+  async saveText(kind: TextAddKind, text: string, via: SaveVia = "telegram", creator = "", inputArtistType: ArtistType = "musician"): Promise<SaveResult> {
     const query = text.trim();
     if (!query) return { ok: false, error: "Enter a title or name" };
     const creatorName = creator.trim();
@@ -767,46 +1279,49 @@ export class LibraryDb {
     try {
       resolved = kind === "artist" && requestedArtistType !== "musician" ? null : await resolveText(kind, query, this.env.TMDB_API_TOKEN, creatorName);
     } catch (e) { error = e instanceof Error ? e.message : String(e); }
-    const fallback: Fetched = kind === "artist" ? { entityType: "artist", name: query, artistType: requestedArtistType }
-      : kind === "album" ? { entityType: "album", title: query, artist: creatorName || "Unknown" }
-      : kind === "track" ? { entityType: "track", title: query, artist: creatorName || "Unknown" }
-      : kind === "book" ? { entityType: "book", title: query, author: creatorName || "Unknown" }
-      : { entityType: "media", kind, title: query };
-    const source = resolved?.source ?? "manual";
-    const sourceId = resolved?.sourceId ?? `${kind}:${normalize(query)}:${normalize(creatorName)}:${kind === "artist" ? requestedArtistType : ""}`;
+    const fallback: Fetched = kind === "artist" ? { kind: "artist", name: query, artistType: requestedArtistType }
+      : kind === "album" ? { kind: "album", title: query, artist: creatorName || "Unknown" }
+      : kind === "track" ? { kind: "track", title: query, artist: creatorName || "Unknown" }
+      : kind === "book" ? { kind: "book", title: query, author: creatorName || "Unknown" }
+      : { kind, title: query };
+    const provider = resolved?.provider ?? "manual";
+    const providerId = resolved?.providerId ?? `${kind}:${normalize(query)}:${normalize(creatorName)}:${kind === "artist" ? requestedArtistType : ""}`;
     const url = resolved?.url ?? `text:${encodeURIComponent(query)}`;
-    const existing = await this.first<{ id: number; title: string | null; status: string; entity_type: string | null }>(
-      "SELECT id, title, status, entity_type FROM links WHERE source = ? AND source_kind = ? AND source_id = ?", [source, kind, sourceId],
+    const existing = await this.first<{ id: number; title: string | null; status: string; item_kind: ItemKind | null; saved_at: string | null }>(
+      "SELECT id, title, status, item_kind, saved_at FROM item_sources WHERE provider = ? AND item_kind = ? AND provider_id = ?", [provider, kind, providerId],
     );
-    if (existing) return { ok: true, duplicate: true, linkId: existing.id, status: existing.status, entityType: existing.entity_type, title: existing.title ?? query };
+    if (existing?.saved_at) return { ok: true, duplicate: true, linkId: existing.id, status: existing.status, itemKind: existing.item_kind, title: existing.title ?? query };
     const fetched = resolved?.fetched ?? fallback;
-    const up = await this.upsertEntity(fetched, { source, sourceId, url });
-    if (!(fetched.entityType === "artist" && artistType(fetched.artistType) !== "musician")) await this.enqueueEnrich(up.enrichType ?? up.entityType, up.entityId);
-    await this.enqueueRelated(up.entityType, up.entityId);
+    const up = await this.upsertEntity(fetched);
+    if (!(fetched.kind === "artist" && artistType(fetched.artistType) !== "musician")) await this.enqueueEnrich(up.itemKind, up.itemId);
+    await this.enqueueRelated(up.itemKind, up.itemId);
     const status = resolved ? "ok" : "pending";
-    const linkId = Number(await this.scalar(
-      `INSERT INTO links (url, source, source_kind, source_id, entity_type, entity_id, title, status, raw_json, saved_via)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id AS value`,
-      [url, source, kind, sourceId, up.entityType, up.entityId, up.title, status, JSON.stringify(resolved?.fetched ?? { query, error: error ?? "No catalogue match" }), via],
-    ));
-    return { ok: true, linkId, status, entityType: up.entityType, title: up.title, error: error ?? (resolved ? undefined : "No catalogue match") };
+    const saved = await this.saveItemSource({
+      provider, providerId, itemKind: up.itemKind, itemId: up.itemId, url, title: up.title, status,
+      rawJson: JSON.stringify(resolved?.fetched ?? { query, error: error ?? "No catalogue match" }), savedVia: via,
+    });
+    return { ok: true, duplicate: saved.duplicate, linkId: saved.id, status, itemKind: up.itemKind, title: up.title, error: error ?? (resolved ? undefined : "No catalogue match") };
   }
 
-  async setTelegramAddKind(chatId: number, userId: number, kind: TextAddKind): Promise<void> {
-    await this.kvSet(`telegram:add:${chatId}:${userId}`, kind);
+  async setTelegramAddMode(chatId: number, userId: number, mode: TelegramAddMode): Promise<void> {
+    await this.kvSet(`telegram:add:${chatId}:${userId}`, mode);
   }
 
-  async takeTelegramAddKind(chatId: number, userId: number): Promise<TextAddKind | null> {
+  async takeTelegramAddMode(chatId: number, userId: number): Promise<TelegramAddMode | null> {
     const key = `telegram:add:${chatId}:${userId}`;
     const value = await this.kvGet(key);
     if (value) await this.run("DELETE FROM kv WHERE key = ?", [key]);
-    return isTextAddKind(value) ? value : null;
+    return value === "live" || isTextAddKind(value) ? value : null;
+  }
+
+  async clearTelegramAddMode(chatId: number, userId: number): Promise<void> {
+    await this.run("DELETE FROM kv WHERE key = ?", [`telegram:add:${chatId}:${userId}`]);
   }
 
   // --- bulk import (migration from the legacy SQLite catalog) --------------
 
   async resetCatalog(): Promise<void> {
-    for (const t of ["track_artists", "tracks", "albums", "artists", "book_authors", "books", "authors", "media_items", "links", "enrich_queue"]) {
+    for (const t of ["track_artists", "tracks", "albums", "artists", "book_authors", "books", "authors", "media_items", "item_sources", "enrich_queue"]) {
       await this.run(`DELETE FROM ${t}`);
     }
   }
@@ -820,27 +1335,79 @@ export class LibraryDb {
     await this.run("INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value", [key, value]);
   }
 
-  /** Record a provider-owned identifier without replacing the original source. */
-  private async recordExternalId(
-    entityType: string,
-    entityId: number,
-    provider: string,
-    externalId: string | null | undefined,
-    externalUrl?: string | null,
+  private async saveItemSource(input: {
+    provider: Provider;
+    providerId: string;
+    itemKind: ItemKind | null;
+    itemId: number | null;
+    url: string;
+    title: string;
+    status: string;
+    rawJson: string;
+    savedVia: SaveVia;
+  }): Promise<{ id: number; duplicate: boolean }> {
+    const existing = await this.first<{ id: number; saved_at: string | null }>(
+      "SELECT id, saved_at FROM item_sources WHERE provider = ? AND item_kind IS ? AND provider_id = ?",
+      [input.provider, input.itemKind, input.providerId],
+    );
+    if (existing?.saved_at) return { id: existing.id, duplicate: true };
+
+    if (existing) {
+      await this.run(
+        `UPDATE item_sources SET item_id = COALESCE(item_id, ?), url = ?, title = ?, status = ?, raw_json = ?,
+           saved_at = datetime('now'), saved_via = ? WHERE id = ?`,
+        [input.itemId, input.url, input.title, input.status, input.rawJson, input.savedVia, existing.id],
+      );
+      return { id: existing.id, duplicate: false };
+    }
+
+    const hasPrimary = input.itemKind && input.itemId !== null
+      ? await this.first<{ id: number }>("SELECT id FROM item_sources WHERE item_kind = ? AND item_id = ? AND is_primary = 1", [input.itemKind, input.itemId])
+      : null;
+    const isPrimary = input.itemKind !== null && input.itemId !== null && !hasPrimary;
+    await this.run(
+      `INSERT OR IGNORE INTO item_sources
+         (item_kind, item_id, provider, provider_id, url, title, status, raw_json, saved_at, saved_via, is_primary)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?)`,
+      [input.itemKind, input.itemId, input.provider, input.providerId, input.url, input.title, input.status, input.rawJson, input.savedVia, isPrimary ? 1 : 0],
+    );
+    const inserted = await this.first<{ id: number; saved_at: string | null }>(
+      "SELECT id, saved_at FROM item_sources WHERE provider = ? AND item_kind IS ? AND provider_id = ?",
+      [input.provider, input.itemKind, input.providerId],
+    );
+    if (!inserted) throw new Error("Failed to save item source");
+    if (!inserted.saved_at) {
+      await this.run(
+        `UPDATE item_sources SET item_id = COALESCE(item_id, ?), url = ?, title = ?, status = ?, raw_json = ?,
+           saved_at = datetime('now'), saved_via = ? WHERE id = ?`,
+        [input.itemId, input.url, input.title, input.status, input.rawJson, input.savedVia, inserted.id],
+      );
+    }
+    return { id: inserted.id, duplicate: !!inserted.saved_at };
+  }
+
+  /** Record a provider-owned identifier without marking it as user-saved. */
+  private async recordItemSource(
+    itemKind: ItemKind,
+    itemId: number,
+    provider: Provider,
+    providerId: string | null | undefined,
+    url?: string | null,
     primary = false,
   ): Promise<void> {
-    if (!externalId) return;
+    if (!providerId) return;
     if (primary) {
-      await this.run("UPDATE external_ids SET is_primary = 0 WHERE entity_type = ? AND entity_id = ?", [entityType, entityId]);
+      await this.run("UPDATE item_sources SET is_primary = 0 WHERE item_kind = ? AND item_id = ?", [itemKind, itemId]);
     }
     await this.run(
-      `INSERT INTO external_ids (entity_type, entity_id, provider, external_id, external_url, is_primary)
-       VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT(entity_type, entity_id, provider) DO UPDATE SET
-         external_id = excluded.external_id,
-         external_url = COALESCE(excluded.external_url, external_ids.external_url),
-         is_primary = excluded.is_primary`,
-      [entityType, entityId, provider, externalId, externalUrl ?? null, primary ? 1 : 0],
+      `INSERT OR IGNORE INTO item_sources (item_kind, item_id, provider, provider_id, url, status, is_primary)
+       VALUES (?, ?, ?, ?, ?, 'ok', ?)`,
+      [itemKind, itemId, provider, providerId, url ?? null, primary ? 1 : 0],
+    );
+    await this.run(
+      `UPDATE item_sources SET provider_id = ?, url = COALESCE(?, url), is_primary = ?
+       WHERE item_kind = ? AND item_id = ? AND provider = ?`,
+      [providerId, url ?? null, primary ? 1 : 0, itemKind, itemId, provider],
     );
   }
 
@@ -885,27 +1452,26 @@ export class LibraryDb {
       "INSERT OR IGNORE INTO track_artists (track_id, artist_id, position, role) VALUES (?, ?, ?, ?)",
       [ta.track_id, ta.artist_id, ta.position ?? 0, ta.role ?? "main"],
     )), "trackArtists");
-    const externalIdStmt = (entityType: string, entityId: number, provider: string, externalId: string | null | undefined, primary = false) =>
-      externalId
+    const sourceStmt = (itemKind: ItemKind, itemId: number, provider: Provider, providerId: string | null | undefined, primary = false) =>
+      providerId
         ? this.stmt(
-            `INSERT INTO external_ids (entity_type, entity_id, provider, external_id, is_primary)
-             VALUES (?, ?, ?, ?, ?)
-             ON CONFLICT(entity_type, entity_id, provider) DO UPDATE SET external_id = excluded.external_id, is_primary = excluded.is_primary`,
-            [entityType, entityId, provider, externalId, primary ? 1 : 0],
+            `INSERT OR IGNORE INTO item_sources (item_kind, item_id, provider, provider_id, status, is_primary)
+             VALUES (?, ?, ?, ?, 'ok', ?)`,
+            [itemKind, itemId, provider, providerId, primary ? 1 : 0],
           )
         : null;
-    const externalIds = [
-      ...(p.artists ?? []).map((a) => externalIdStmt("artist", a.id, "musicbrainz", a.mbid, true)),
-      ...(p.albums ?? []).map((al) => externalIdStmt("album", al.id, "musicbrainz-release", al.mbid, true)),
+    const sources = [
+      ...(p.artists ?? []).map((a) => sourceStmt("artist", a.id, "musicbrainz", a.mbid, true)),
+      ...(p.albums ?? []).map((al) => sourceStmt("album", al.id, "musicbrainz-release", al.mbid, true)),
       ...(p.tracks ?? []).flatMap((t) => [
-        externalIdStmt("track", t.id, "musicbrainz-recording", t.mbid, true),
-        externalIdStmt("track", t.id, "isrc", t.isrc),
+        sourceStmt("track", t.id, "musicbrainz-recording", t.mbid, true),
+        sourceStmt("track", t.id, "isrc", t.isrc),
       ]),
     ].filter((s): s is D1PreparedStatement => s !== null);
-    await runStatements(externalIds);
+    await runStatements(sources);
     await runStatements([
-      ...(p.artists ?? []).map((a) => this.stmt("INSERT OR IGNORE INTO enrich_queue (entity_type, entity_id) VALUES ('artist', ?)", [a.id])),
-      ...(p.albums ?? []).map((al) => this.stmt("INSERT OR IGNORE INTO enrich_queue (entity_type, entity_id) VALUES ('album', ?)", [al.id])),
+      ...(p.artists ?? []).map((a) => this.stmt("INSERT OR IGNORE INTO enrich_queue (item_kind, item_id) VALUES ('artist', ?)", [a.id])),
+      ...(p.albums ?? []).map((al) => this.stmt("INSERT OR IGNORE INTO enrich_queue (item_kind, item_id) VALUES ('album', ?)", [al.id])),
     ]);
     return c;
   }
@@ -969,10 +1535,10 @@ export class LibraryDb {
           result.skipped++;
           continue;
         }
-        await this.run("UPDATE links SET entity_id = ? WHERE entity_type = 'artist' AND entity_id = ?", [primaryId, artist.id]);
+        await this.run("UPDATE OR IGNORE item_sources SET item_id = ? WHERE item_kind = 'artist' AND item_id = ?", [primaryId, artist.id]);
         await this.run("DELETE FROM track_artists WHERE artist_id = ?", [artist.id]);
-        await this.run("DELETE FROM external_ids WHERE entity_type = 'artist' AND entity_id = ?", [artist.id]);
-        await this.run("DELETE FROM enrich_queue WHERE entity_type = 'artist' AND entity_id = ?", [artist.id]);
+        await this.run("DELETE FROM item_sources WHERE item_kind = 'artist' AND item_id = ?", [artist.id]);
+        await this.run("DELETE FROM enrich_queue WHERE item_kind = 'artist' AND item_id = ?", [artist.id]);
         await this.run("DELETE FROM artists WHERE id = ?", [artist.id]);
         for (const credit of resolved) await this.enqueueEnrich("artist", credit.id);
         result.repaired++;
@@ -986,20 +1552,20 @@ export class LibraryDb {
 
   // --- background enrichment ------------------------------------------------
 
-  private async enqueueEnrich(entityType: string, entityId: number): Promise<void> {
-    await this.run("INSERT OR IGNORE INTO enrich_queue (entity_type, entity_id) VALUES (?, ?)", [entityType, entityId]);
+  private async enqueueEnrich(itemKind: ItemKind, itemId: number): Promise<void> {
+    await this.run("INSERT OR IGNORE INTO enrich_queue (item_kind, item_id) VALUES (?, ?)", [itemKind, itemId]);
   }
 
   /** Also enrich the artist/album that a saved track (or album) hangs off of. */
-  private async enqueueRelated(entityType: string, entityId: number): Promise<void> {
-    if (entityType === "track") {
-      const t = await this.first<{ artist_id: number | null; album_id: number | null }>("SELECT artist_id, album_id FROM tracks WHERE id = ?", [entityId]);
-      const artists = await this.all<{ artist_id: number }>("SELECT artist_id FROM track_artists WHERE track_id = ?", [entityId]);
+  private async enqueueRelated(itemKind: ItemKind, itemId: number): Promise<void> {
+    if (itemKind === "track") {
+      const t = await this.first<{ artist_id: number | null; album_id: number | null }>("SELECT artist_id, album_id FROM tracks WHERE id = ?", [itemId]);
+      const artists = await this.all<{ artist_id: number }>("SELECT artist_id FROM track_artists WHERE track_id = ?", [itemId]);
       for (const artist of artists) await this.enqueueEnrich("artist", artist.artist_id);
       if (!artists.length && t?.artist_id) await this.enqueueEnrich("artist", t.artist_id);
       if (t?.album_id) await this.enqueueEnrich("album", t.album_id);
-    } else if (entityType === "album") {
-      const al = await this.first<{ artist_id: number | null }>("SELECT artist_id FROM albums WHERE id = ?", [entityId]);
+    } else if (itemKind === "album") {
+      const al = await this.first<{ artist_id: number | null }>("SELECT artist_id FROM albums WHERE id = ?", [itemId]);
       if (al?.artist_id) await this.enqueueEnrich("artist", al.artist_id);
     }
   }
@@ -1008,25 +1574,25 @@ export class LibraryDb {
   async drainEnrichment(limit = 5): Promise<number> {
     let done = 0;
     for (let i = 0; i < limit; i++) {
-      const item = await this.first<{ id: number; entity_type: string; entity_id: number; attempts: number }>(
-        `SELECT id, entity_type, entity_id, attempts
+      const item = await this.first<{ id: number; item_kind: ItemKind; item_id: number; attempts: number }>(
+        `SELECT id, item_kind, item_id, attempts
          FROM enrich_queue
-         ORDER BY CASE entity_type
-           WHEN 'media' THEN 0
-           WHEN 'book' THEN 1
-           WHEN 'album' THEN 2
-           WHEN 'artist' THEN 3
+         ORDER BY CASE
+           WHEN item_kind IN ('movie', 'series', 'anime', 'manga', 'webtoon', 'comic') THEN 0
+           WHEN item_kind = 'book' THEN 1
+           WHEN item_kind = 'album' THEN 2
+           WHEN item_kind = 'artist' THEN 3
            ELSE 4
          END, id
          LIMIT 1`,
       );
       if (!item) break;
       try {
-        await this.enrichOne(item.entity_type, item.entity_id);
+        await this.enrichOne(item.item_kind, item.item_id);
         await this.run("DELETE FROM enrich_queue WHERE id = ?", [item.id]);
         done++;
       } catch (e) {
-        console.error("enrich failed", item.entity_type, item.entity_id, e);
+        console.error("enrich failed", item.item_kind, item.item_id, e);
         if (item.attempts + 1 >= MAX_ATTEMPTS) await this.run("DELETE FROM enrich_queue WHERE id = ?", [item.id]);
         else await this.run("UPDATE enrich_queue SET attempts = attempts + 1 WHERE id = ?", [item.id]);
       }
@@ -1034,8 +1600,8 @@ export class LibraryDb {
     return done;
   }
 
-  private async enrichOne(type: string, id: number): Promise<void> {
-    switch (type) {
+  private async enrichOne(kind: ItemKind, id: number): Promise<void> {
+    switch (kind) {
       case "artist":
         return this.enrichArtistRow(id);
       case "album":
@@ -1044,8 +1610,8 @@ export class LibraryDb {
         return this.enrichTrackRow(id);
       case "book":
         return this.enrichBookRow(id);
-      case "media":
-        return this.enrichMediaRow(id);
+      default:
+        if (isVisualKind(kind)) return this.enrichMediaRow(id);
     }
   }
 
@@ -1067,8 +1633,8 @@ export class LibraryDb {
       "UPDATE artists SET mbid = COALESCE(mbid, ?), genres = COALESCE(genres, ?), image_url = COALESCE(image_url, ?), image_key = COALESCE(image_key, ?), enriched_at = datetime('now') WHERE id = ?",
       [res?.mbid ?? null, res?.genres ?? null, imageUrl, imageKey ?? null, id],
     );
-    await this.recordExternalId("artist", id, "musicbrainz", res?.mbid, null, true);
-    await this.recordExternalId("artist", id, deezer?.provider ?? "deezer-artist", deezer?.id);
+    await this.recordItemSource("artist", id, "musicbrainz", res?.mbid, null, true);
+    await this.recordItemSource("artist", id, deezer?.provider ?? "deezer-artist", deezer?.id);
   }
 
   private async enrichAlbumRow(id: number): Promise<void> {
@@ -1090,8 +1656,8 @@ export class LibraryDb {
       "UPDATE albums SET mbid = COALESCE(mbid, ?), year = COALESCE(year, ?), cover_url = COALESCE(cover_url, ?), cover_key = COALESCE(cover_key, ?), enriched_at = datetime('now') WHERE id = ?",
       [res?.mbid ?? null, res?.year ?? deezer?.year ?? null, coverUrl ?? null, coverKey ?? null, id],
     );
-    await this.recordExternalId("album", id, "musicbrainz-release", res?.mbid, null, true);
-    await this.recordExternalId("album", id, deezer?.provider ?? "deezer-album", deezer?.id);
+    await this.recordItemSource("album", id, "musicbrainz-release", res?.mbid, null, true);
+    await this.recordItemSource("album", id, deezer?.provider ?? "deezer-album", deezer?.id);
   }
 
   private async enrichTrackRow(id: number): Promise<void> {
@@ -1105,8 +1671,8 @@ export class LibraryDb {
       "UPDATE tracks SET mbid = COALESCE(mbid, ?), isrc = COALESCE(isrc, ?) WHERE id = ?",
       [res?.mbid ?? null, res?.isrc ?? null, id],
     );
-    await this.recordExternalId("track", id, "musicbrainz-recording", res?.mbid, null, true);
-    await this.recordExternalId("track", id, "isrc", res?.isrc);
+    await this.recordItemSource("track", id, "musicbrainz-recording", res?.mbid, null, true);
+    await this.recordItemSource("track", id, "isrc", res?.isrc);
   }
 
   private async enrichBookRow(id: number): Promise<void> {
@@ -1122,22 +1688,30 @@ export class LibraryDb {
     let coverKey = row.cover_key;
     if (!coverKey && coverUrl) coverKey = await cacheImage(this.env, coverUrl, `book/${id}`);
     await this.run(
-      `UPDATE books SET olid = COALESCE(olid, ?), page_count = COALESCE(page_count, ?), year = COALESCE(year, ?),
+      `UPDATE books SET olid = COALESCE(olid, ?), isbn = COALESCE(isbn, ?), page_count = COALESCE(page_count, ?), year = COALESCE(year, ?),
                         cover_url = COALESCE(cover_url, ?), cover_key = COALESCE(cover_key, ?), enriched_at = datetime('now') WHERE id = ?`,
-      [res?.olid ?? null, res?.pageCount ?? null, res?.year ?? null, coverUrl, coverKey ?? null, id],
+      [res?.olid ?? null, res?.isbn ?? null, res?.pageCount ?? null, res?.year ?? null, coverUrl, coverKey ?? null, id],
     );
-    await this.recordExternalId("book", id, "openlibrary", res?.olid, res?.olid ? `https://openlibrary.org/books/${res.olid}` : null, true);
-    await this.recordExternalId("book", id, "isbn", row.isbn);
+    await this.recordItemSource("book", id, "openlibrary", res?.olid, res?.olid ? `https://openlibrary.org/works/${res.olid}` : null, true);
+    await this.recordItemSource("book", id, "isbn", row.isbn ?? res?.isbn);
   }
 
   private async enrichMediaRow(id: number): Promise<void> {
-    const row = await this.first<{ kind: MediaKind; title: string; year: number | null; source: string | null; source_id: string | null; cover_url: string | null; cover_key: string | null }>(
-      "SELECT kind, title, year, source, source_id, cover_url, cover_key FROM media_items WHERE id = ?", [id],
+    const row = await this.first<{ kind: VisualKind; title: string; year: number | null; cover_url: string | null; cover_key: string | null }>(
+      "SELECT kind, title, year, cover_url, cover_key FROM media_items WHERE id = ?", [id],
     );
     if (!row) return;
+    const source = row.kind === "anime" || row.kind === "manga"
+      ? await this.first<{ provider_id: string }>(
+          "SELECT provider_id FROM item_sources WHERE item_kind = ? AND item_id = ? AND provider = 'myanimelist' ORDER BY is_primary DESC LIMIT 1",
+          [row.kind, id],
+        )
+      : null;
     const match = row.kind === "anime" || row.kind === "manga"
-      ? row.source === "myanimelist" && row.source_id ? await findJikanMedia(row.kind, row.source_id) : null
-      : await findTmdbMedia(row.kind, row.title, row.year, this.env.TMDB_API_TOKEN);
+      ? source?.provider_id ? await findJikanMedia(row.kind, source.provider_id) : null
+      : row.kind === "movie" || row.kind === "series"
+        ? await findTmdbMedia(row.kind, row.title, row.year, this.env.TMDB_API_TOKEN)
+        : null;
     const coverUrl = row.cover_url ?? match?.imageUrl ?? null;
     let coverKey = row.cover_key;
     if (!coverKey && coverUrl) coverKey = await cacheImage(this.env, coverUrl, `media/${id}`);
@@ -1145,36 +1719,31 @@ export class LibraryDb {
       "UPDATE media_items SET year = COALESCE(year, ?), description = COALESCE(description, ?), cover_url = COALESCE(cover_url, ?), cover_key = COALESCE(cover_key, ?), enriched_at = datetime('now') WHERE id = ?",
       [match?.year ?? null, match?.description ?? null, coverUrl, coverKey ?? null, id],
     );
-    if (match) await this.recordExternalId(row.kind, id, match.provider, match.id, match.url, true);
+    if (match) await this.recordItemSource(row.kind, id, match.provider, match.id, match.url, true);
   }
 
-  private async upsertEntity(f: Fetched, c: { source: string; sourceId: string; url: string }): Promise<{ entityType: string; entityId: number; title: string; enrichType?: string }> {
-    switch (f.entityType) {
+  private async upsertEntity(f: Fetched): Promise<{ itemKind: ItemKind; itemId: number; title: string }> {
+    switch (f.kind) {
       case "artist": {
         const id = await this.getOrCreateArtist(f.name, f.imageUrl, f.artistType);
-        await this.recordExternalId("artist", id, c.source, c.sourceId, c.url, true);
-        return { entityType: "artist", entityId: id, title: f.name };
+        return { itemKind: "artist", itemId: id, title: f.name };
       }
       case "album": {
         const artistId = await this.getOrCreateArtist(f.artist);
         const id = await this.getOrCreateAlbum(f.title, artistId, { year: f.year, coverUrl: f.coverUrl });
-        await this.recordExternalId("album", id, c.source, c.sourceId, c.url, true);
-        return { entityType: "album", entityId: id, title: f.title };
+        return { itemKind: "album", itemId: id, title: f.title };
       }
       case "track": {
         const id = await this.upsertTrack(f);
-        await this.recordExternalId("track", id, c.source, c.sourceId, c.url, true);
-        return { entityType: "track", entityId: id, title: f.title };
+        return { itemKind: "track", itemId: id, title: f.title };
       }
       case "book": {
         const id = await this.getOrCreateBook(f);
-        await this.recordExternalId("book", id, c.source, c.sourceId, c.url, true);
-        return { entityType: "book", entityId: id, title: f.title };
+        return { itemKind: "book", itemId: id, title: f.title };
       }
-      case "media": {
-        const id = await this.getOrCreateMedia(f, c);
-        await this.recordExternalId(f.kind, id, `${c.source}:${f.kind}`, c.sourceId, c.url, true);
-        return { entityType: f.kind, entityId: id, title: f.title, enrichType: "media" };
+      default: {
+        const id = await this.getOrCreateMedia(f);
+        return { itemKind: f.kind, itemId: id, title: f.title };
       }
     }
   }
@@ -1218,27 +1787,24 @@ export class LibraryDb {
     return bookId;
   }
 
-  private async getOrCreateMedia(f: FetchedMedia, c: { source: string; sourceId: string; url: string }): Promise<number> {
+  private async getOrCreateMedia(f: FetchedVisual): Promise<number> {
     const norm = normalize(f.title);
-    let row = await this.first<{ id: number }>("SELECT id FROM media_items WHERE source = ? AND kind = ? AND source_id = ?", [c.source, f.kind, c.sourceId]);
-    if (!row) row = await this.first<{ id: number }>("SELECT id FROM media_items WHERE kind = ? AND normalized_title = ?", [f.kind, norm]);
+    const row = await this.first<{ id: number }>("SELECT id FROM media_items WHERE kind = ? AND normalized_title = ?", [f.kind, norm]);
 
     if (row) {
       await this.run(
-        `UPDATE media_items
-         SET source = COALESCE(source, ?), source_id = COALESCE(source_id, ?), source_url = COALESCE(source_url, ?),
-             year = COALESCE(year, ?), cover_url = COALESCE(cover_url, ?), description = COALESCE(description, ?)
-         WHERE id = ?`,
-        [c.source, c.sourceId, c.url, f.year ?? null, f.coverUrl ?? null, f.description ?? null, row.id],
+        `UPDATE media_items SET year = COALESCE(year, ?), cover_url = COALESCE(cover_url, ?),
+           description = COALESCE(description, ?) WHERE id = ?`,
+        [f.year ?? null, f.coverUrl ?? null, f.description ?? null, row.id],
       );
       return row.id;
     }
 
     return Number(
       await this.scalar(
-        `INSERT INTO media_items (kind, title, normalized_title, source, source_id, source_url, year, cover_url, description)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id AS value`,
-        [f.kind, f.title, norm, c.source, c.sourceId, c.url, f.year ?? null, f.coverUrl ?? null, f.description ?? null],
+        `INSERT INTO media_items (kind, title, normalized_title, year, cover_url, description)
+         VALUES (?, ?, ?, ?, ?, ?) RETURNING id AS value`,
+        [f.kind, f.title, norm, f.year ?? null, f.coverUrl ?? null, f.description ?? null],
       ),
     );
   }

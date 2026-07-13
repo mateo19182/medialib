@@ -1,4 +1,4 @@
-import type { Classified, FetchedMedia } from "./types";
+import type { Classified, FetchedVisual } from "./types";
 import { fetchText, jsonLd, ldFind, metaTags } from "./extract";
 import { extractYear, htmlDecode } from "../util";
 
@@ -20,7 +20,7 @@ function ldImage(v: unknown): string | undefined {
 }
 
 /** Pure: build an anime/manga media item from MyAnimeList metadata. */
-export function parseMyAnimeList(node: LdNode | null, og: Record<string, string>, kind: "anime" | "manga"): FetchedMedia | null {
+export function parseMyAnimeList(node: LdNode | null, og: Record<string, string>, kind: "anime" | "manga"): FetchedVisual | null {
   const rawTitle = String(node?.name ?? og["og:title"] ?? "");
   const title = cleanTitle(rawTitle);
   if (!title) return null;
@@ -29,7 +29,6 @@ export function parseMyAnimeList(node: LdNode | null, og: Record<string, string>
   const cover = ldImage(node?.image) ?? og["og:image"];
   const date = String(node?.datePublished ?? node?.startDate ?? "");
   return {
-    entityType: "media",
     kind,
     title,
     year: extractYear(date || description),
@@ -38,9 +37,9 @@ export function parseMyAnimeList(node: LdNode | null, og: Record<string, string>
   };
 }
 
-export async function fetchMyAnimeList(c: Classified): Promise<FetchedMedia | null> {
-  if (c.kind !== "anime" && c.kind !== "manga") return null;
+export async function fetchMyAnimeList(c: Classified): Promise<FetchedVisual | null> {
+  if (c.itemKind !== "anime" && c.itemKind !== "manga") return null;
   const html = await fetchText(c.url);
   const node = ldFind(jsonLd(html), "TVSeries", "Movie", "Book");
-  return parseMyAnimeList(node, metaTags(html), c.kind);
+  return parseMyAnimeList(node, metaTags(html), c.itemKind);
 }

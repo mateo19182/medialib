@@ -22,7 +22,7 @@ function ldImage(v: unknown): string | undefined {
 }
 
 /** Pure: build a catalog entity from Bandcamp's JSON-LD + og fallback. */
-export function parseBandcamp(node: LdNode | null, og: Record<string, string>, kind: Classified["kind"]): Fetched | null {
+export function parseBandcamp(node: LdNode | null, og: Record<string, string>, kind: "album" | "track"): Fetched | null {
   const name = htmlDecode(String(node?.name ?? og["og:title"] ?? "")).replace(/,\s*by\s+.+$/i, "").trim();
   if (!name) return null;
   const artist = ldName(node?.byArtist) ?? (og["og:title"]?.match(/,\s*by\s+(.+)$/i)?.[1]) ?? og["og:site_name"] ?? "Unknown";
@@ -30,14 +30,15 @@ export function parseBandcamp(node: LdNode | null, og: Record<string, string>, k
   const year = extractYear(String(node?.datePublished ?? ""));
 
   if (kind === "album") {
-    return { entityType: "album", title: name, artist, year, coverUrl: cover };
+    return { kind: "album", title: name, artist, year, coverUrl: cover };
   }
   const album = ldName(node?.inAlbum);
-  return { entityType: "track", title: name, artist, album, year, coverUrl: cover };
+  return { kind: "track", title: name, artist, album, year, coverUrl: cover };
 }
 
 export async function fetchBandcamp(c: Classified): Promise<Fetched | null> {
+  if (c.itemKind !== "album" && c.itemKind !== "track") return null;
   const html = await fetchText(c.url);
   const node = ldFind(jsonLd(html), "MusicAlbum", "MusicRecording");
-  return parseBandcamp(node, metaTags(html), c.kind);
+  return parseBandcamp(node, metaTags(html), c.itemKind);
 }

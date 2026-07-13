@@ -24,7 +24,7 @@ export function parseGoodreads(node: LdNode | null, og: Record<string, string>):
   const image = node?.image;
   const cover = typeof image === "string" ? image : og["og:image"];
   return {
-    entityType: "book",
+    kind: "book",
     title,
     author: ldAuthors(node?.author) ?? "Unknown",
     isbn: typeof node?.isbn === "string" ? node.isbn : undefined,

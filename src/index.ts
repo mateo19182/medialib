@@ -16,16 +16,20 @@ import {
   liveShowsPage,
   mediaItemPage,
   mediaListPage,
+  migratePage,
   searchPage,
   stars,
   trackPage,
+  youtubeSyncPage,
   type MusicView,
 } from "./web/pages";
 import { READING_STATUSES, type LiveShowInput, type RatableKind, type ReadingStatus } from "./db/library";
-import type { ArtistType, MediaKind } from "./ingest/types";
+import type { ArtistType, VisualKind } from "./ingest/types";
 import { handleWebhook, registerWebhook } from "./bot/telegram";
 import { isTextAddKind } from "./ingest/text";
 import { normalize } from "./util";
+import { googleAuthorizationUrl, handleGoogleOAuthCallback, runYouTubeMigrationBatch } from "./migrate/youtube";
+import { fetchYouTubePlaylistTitle, runYouTubeSourceSync, youtubePlaylistIdFromInput } from "./sync/youtube";
 
 export { Library } from "./do/legacy";
 
@@ -55,8 +59,100 @@ app.get("/", async (c) => {
   return c.html(dashboard(await getLibrary(c.env).stats()));
 });
 
+app.get("/migrate", async (c) => {
+  const lib = getLibrary(c.env);
+  const [status, token] = await Promise.all([lib.youtubeMigrationStatus(), lib.getOAuthToken("google")]);
+  return c.html(migratePage(status, !!token, c.req.query("message") ?? ""));
+});
+
+app.get("/youtube-sync", async (c) => {
+  const lib = getLibrary(c.env);
+  const [playlists, run, token] = await Promise.all([
+    lib.listYoutubeSyncPlaylists(),
+    lib.recentYoutubeSyncRun(),
+    lib.getOAuthToken("google"),
+  ]);
+  return c.html(youtubeSyncPage(playlists, run, !!token, c.req.query("message") ?? ""));
+});
+
+app.get("/oauth/google/start", async (c) => {
+  try {
+    return c.redirect(await googleAuthorizationUrl(c.env, new URL(c.req.url).origin, c.req.query("next") ?? "/migrate"), 302);
+  } catch (error) {
+    return c.html(migratePage(await getLibrary(c.env).youtubeMigrationStatus(), false, error instanceof Error ? error.message : String(error)), 500);
+  }
+});
+
+app.get("/oauth/google/callback", async (c) => {
+  const code = c.req.query("code");
+  const state = c.req.query("state");
+  if (!code || !state) return c.text("Missing OAuth code or state", 400);
+  try {
+    const returnTo = await handleGoogleOAuthCallback(c.env, new URL(c.req.url).origin, code, state);
+    const separator = returnTo.includes("?") ? "&" : "?";
+    return c.redirect(`${returnTo}${separator}message=Google%20connected`, 303);
+  } catch (error) {
+    return c.text(error instanceof Error ? error.message : String(error), 400);
+  }
+});
+
+app.post("/migrate/start", async (c) => {
+  const lib = getLibrary(c.env);
+  const reset = c.req.query("reset") === "1";
+  await lib.startYoutubeMigration(reset);
+  c.executionCtx.waitUntil(runYouTubeMigrationBatch(c.env, YOUTUBE_MIGRATION_BATCH_SIZE));
+  return c.redirect("/migrate?message=Migration%20started", 303);
+});
+
+app.post("/migrate/run", async (c) => {
+  const limit = Math.max(1, Math.min(10, Number(c.req.query("limit") ?? YOUTUBE_MIGRATION_BATCH_SIZE)));
+  const result = await runYouTubeMigrationBatch(c.env, limit);
+  const message = encodeURIComponent(result.message ?? `Batch processed ${result.processed} track${result.processed === 1 ? "" : "s"}`);
+  return c.redirect(`/migrate?message=${message}`, 303);
+});
+
+app.post("/youtube-sync/playlists", async (c) => {
+  const body = await c.req.parseBody();
+  const playlistId = youtubePlaylistIdFromInput(String(body.playlist ?? ""));
+  if (!playlistId) return c.redirect("/youtube-sync?message=Enter%20a%20playlist%20URL%20or%20ID", 303);
+  let title = String(body.title ?? "").trim();
+  if (!title && await getLibrary(c.env).getOAuthToken("google")) {
+    title = await fetchYouTubePlaylistTitle(c.env, playlistId).catch(() => "") ?? "";
+  }
+  await getLibrary(c.env).upsertYoutubeSyncPlaylist({
+    playlistId,
+    title,
+    scanLimit: Number(body.scanLimit ?? 3),
+    stopAfterKnown: Number(body.stopAfterKnown ?? 25),
+  });
+  return c.redirect("/youtube-sync?message=Playlist%20saved", 303);
+});
+
+app.post("/youtube-sync/playlists/:id", async (c) => {
+  const body = await c.req.parseBody();
+  await getLibrary(c.env).updateYoutubeSyncPlaylist(Number(c.req.param("id")), {
+    title: String(body.title ?? "").trim(),
+    enabled: body.enabled === "1",
+    scanLimit: Number(body.scanLimit ?? 3),
+    stopAfterKnown: Number(body.stopAfterKnown ?? 25),
+  });
+  return c.redirect("/youtube-sync?message=Playlist%20updated", 303);
+});
+
+app.post("/youtube-sync/playlists/:id/delete", async (c) => {
+  await getLibrary(c.env).deleteYoutubeSyncPlaylist(Number(c.req.param("id")));
+  return c.redirect("/youtube-sync?message=Playlist%20deleted", 303);
+});
+
+app.post("/youtube-sync/run", async (c) => {
+  const playlist = c.req.query("playlist");
+  const result = await runYouTubeSourceSync(c.env, { playlistDbId: playlist ? Number(playlist) : undefined });
+  return c.redirect(`/youtube-sync?message=${encodeURIComponent(result.message ?? "Sync complete")}`, 303);
+});
+
 const pageNumber = (value: string | undefined): number => Math.max(1, Math.floor(Number(value) || 1));
 const PAGE_SIZE = 50;
+const YOUTUBE_MIGRATION_BATCH_SIZE = 10;
 
 app.get("/library", async (c) => {
   const requested = c.req.query("view");
@@ -104,11 +200,16 @@ app.post("/add", async (c) => {
   const title = String(body.title ?? "").trim();
   const creator = String(body.creator ?? "").trim();
   const artistType = String(body.artistType ?? "musician").trim();
-  const result = url
-    ? await getLibrary(c.env).saveLink(url, "web")
-    : isTextAddKind(kind)
-      ? await getLibrary(c.env).saveText(kind, title, "web", creator, artistType as ArtistType)
-      : { ok: false, error: "Choose a media type" };
+  let result;
+  try {
+    result = url
+      ? await getLibrary(c.env).saveLink(url, "web")
+      : isTextAddKind(kind)
+        ? await getLibrary(c.env).saveText(kind, title, "web", creator, artistType as ArtistType)
+        : { ok: false, error: "Choose a media type" };
+  } catch (error) {
+    result = { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
   return c.html(addPage(result));
 });
 
@@ -153,7 +254,7 @@ app.post("/edit/media/:id", async (c) => { const id = Number(c.req.param("id"));
 app.post("/delete/:kind/:id", async (c) => { const kind = c.req.param("kind"); if (!["artist", "album", "track", "book", "media"].includes(kind)) return c.notFound(); await getLibrary(c.env).deleteEntry(kind as "artist" | "album" | "track" | "book" | "media", Number(c.req.param("id"))); const destination = kind === "artist" || kind === "album" || kind === "track" ? "/library" : kind === "book" ? "/books" : "/"; return c.redirect(destination, 303); });
 
 const liveInput = (body: Record<string, unknown>): LiveShowInput => ({ artist: text(body, "artist"), date: text(body, "date"), dateLabel: text(body, "dateLabel"), venue: text(body, "venue"), city: text(body, "city"), context: text(body, "context"), companions: text(body, "companions"), summary: text(body, "summary"), notes: text(body, "notes"), tags: text(body, "tags") });
-const liveFields = (show?: import("./live-shows").LiveShow) => [{ name: "artist", label: "Artist", value: show?.artist }, { name: "date", label: "Date", value: show?.date, type: "date" as const }, { name: "dateLabel", label: "Date label", value: show?.dateLabel }, { name: "venue", label: "Venue", value: show?.venue }, { name: "city", label: "City", value: show?.city }, { name: "context", label: "Context", value: show?.context }, { name: "companions", label: "Companions", value: show?.companions }, { name: "summary", label: "Summary", value: show?.summary, multiline: true }, { name: "notes", label: "Notes", value: show?.notes.join("\n"), multiline: true, hint: "One note per line." }, { name: "tags", label: "Tags", value: show?.tags.join(", "), hint: "Comma-separated." }];
+const liveFields = (show?: import("./live-shows").LiveShow) => [{ name: "artist", label: "Artist", value: show?.artist, required: true }, { name: "date", label: "Date", value: show?.date, type: "date" as const }, { name: "dateLabel", label: "Date label", value: show?.dateLabel }, { name: "venue", label: "Venue", value: show?.venue }, { name: "city", label: "City", value: show?.city }, { name: "context", label: "Context", value: show?.context }, { name: "companions", label: "Companions", value: show?.companions }, { name: "summary", label: "Summary", value: show?.summary, multiline: true }, { name: "notes", label: "Notes", value: show?.notes.join("\n"), multiline: true, hint: "One note per line." }, { name: "tags", label: "Tags", value: show?.tags.join(", "), hint: "Comma-separated." }];
 app.get("/live/add", (c) => c.html(editEntryPage("live show", "/live", "/live/add", liveFields())));
 app.post("/live/add", async (c) => { const lib = getLibrary(c.env); await lib.seedLiveShows(liveShows); const slug = await lib.createLiveShow(liveInput(await c.req.parseBody())); return c.redirect(`/live/${slug}/edit`, 303); });
 app.get("/live/:slug/edit", async (c) => { const lib = getLibrary(c.env); await lib.seedLiveShows(liveShows); const show = await lib.liveShow(c.req.param("slug")); if (!show) return c.notFound(); return c.html(editEntryPage("live show", "/live", `/live/${show.slug}/edit`, liveFields(show), `/live/${show.slug}/delete`)); });
@@ -166,7 +267,7 @@ app.get("/book/:id", async (c) => {
   return c.html(bookPage(detail));
 });
 
-const MEDIA_ROUTES: Record<string, MediaKind> = { movies: "movie", series: "series", anime: "anime", manga: "manga" };
+const MEDIA_ROUTES: Record<string, VisualKind> = { movies: "movie", series: "series", anime: "anime", manga: "manga", webtoons: "webtoon", comics: "comic" };
 
 for (const [path, kind] of Object.entries(MEDIA_ROUTES)) {
   app.get(`/${path}`, async (c) => {
@@ -260,6 +361,8 @@ export default {
   fetch: app.fetch,
   scheduled(_event, env, ctx) {
     const lib = getLibrary(env);
-    ctx.waitUntil(lib.drainEnrichment(5));
+    ctx.waitUntil(lib.drainEnrichment(20));
+    ctx.waitUntil(runYouTubeMigrationBatch(env, YOUTUBE_MIGRATION_BATCH_SIZE));
+    ctx.waitUntil(runYouTubeSourceSync(env));
   },
 } satisfies ExportedHandler<Env>;

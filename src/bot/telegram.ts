@@ -1,7 +1,8 @@
 import type { Env } from "../types";
 import { getLibrary } from "../types";
-import { READING_STATUSES, type RatableKind, type ReadingStatus } from "../db/library";
+import { READING_STATUSES, type LiveShowInput, type RatableKind, type ReadingStatus } from "../db/library";
 import { isTextAddKind, type TextAddKind } from "../ingest/text";
+import { liveShows } from "../live-shows";
 
 // --- minimal Telegram types -------------------------------------------------
 interface TgUser {
@@ -23,6 +24,16 @@ interface TgUpdate {
 }
 interface TgCallbackQuery { id: string; from: TgUser; data?: string; message?: TgMessage; }
 
+type TelegramCallbackDiagnostic = {
+  receivedAt: string;
+  senderId: number;
+  data: string | null;
+  hasMessage: boolean;
+  allowed: boolean;
+  outcome: "received" | "handled" | "error";
+  error?: string;
+};
+
 // --- pure helpers (unit-tested) --------------------------------------------
 const URL_RE = /https?:\/\/[^\s<>]+/g;
 
@@ -36,8 +47,21 @@ export function parseCommand(text: string): { cmd: string; args: string } | null
   return { cmd: m[1].toLowerCase(), args: (m[2] ?? "").trim() };
 }
 
+/** Parse: Artist | YYYY-MM-DD | Venue | City | Summary | Notes | tags, comma-separated */
+export function parseLiveShow(text: string): LiveShowInput | null {
+  const [artist, date, venue, city, summary, notes, tags] = text.split("|").map((value) => value.trim());
+  if (!artist) return null;
+  return { artist, date, venue, city, summary, notes, tags };
+}
+
 function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+async function recordCallbackDiagnostic(env: Env, diagnostic: TelegramCallbackDiagnostic): Promise<void> {
+  await env.DB.prepare(
+    "INSERT INTO kv (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+  ).bind("telegram:callback:last", JSON.stringify(diagnostic)).run();
 }
 
 // --- Telegram API -----------------------------------------------------------
@@ -64,6 +88,8 @@ const HELP = [
   "",
   "Commands:",
   "/add — add an item by name (choose its type first)",
+  "/live — add a live show",
+  "/cancel — cancel the pending add",
   "/search &lt;query&gt; — find saved items",
   "/recent — recently saved",
   "/stats — library counts",
@@ -72,9 +98,11 @@ const HELP = [
   "/fav &lt;trackId&gt; — toggle favorite",
 ].join("\n");
 
-const ADD_KINDS: { kind: TextAddKind; label: string }[] = [
+const ADD_KINDS: { kind: TextAddKind | "live"; label: string }[] = [
   { kind: "track", label: "🎵 Track" }, { kind: "album", label: "💿 Album" }, { kind: "artist", label: "🎤 Artist" }, { kind: "book", label: "📚 Book" },
   { kind: "movie", label: "🎬 Movie" }, { kind: "series", label: "📺 Series" }, { kind: "anime", label: "✨ Anime" }, { kind: "manga", label: "📖 Manga" },
+  { kind: "webtoon", label: "Webtoon" }, { kind: "comic", label: "Comic" },
+  { kind: "live", label: "🎟️ Live show" },
 ];
 
 function addKeyboard(): { inline_keyboard: { text: string; callback_data: string }[][] } {
@@ -93,14 +121,15 @@ async function handleMessage(msg: TgMessage, env: Env): Promise<void> {
 
   const command = parseCommand(text);
   if (command && extractUrls(text).length === 0) {
-    return handleCommand(command.cmd, command.args, chatId, env);
+    return handleCommand(command.cmd, command.args, chatId, msg.from?.id, env);
   }
 
   const urls = extractUrls(text);
   if (urls.length === 0) {
     if (msg.from) {
-      const kind = await getLibrary(env).takeTelegramAddKind(chatId, msg.from.id);
-      if (kind) return saveText(kind, text, chatId, env);
+      const mode = await getLibrary(env).takeTelegramAddMode(chatId, msg.from.id);
+      if (mode === "live") return saveLiveShow(text, chatId, env);
+      if (mode) return saveText(mode, text, chatId, env);
     }
     await send(env, chatId, "Send me a link, or /help.");
     return;
@@ -112,11 +141,24 @@ async function handleMessage(msg: TgMessage, env: Env): Promise<void> {
       const r = await lib.saveLink(url, "telegram");
       if (!r.ok) await send(env, chatId, `⚠️ ${escapeHtml(r.error ?? "Could not save")}: ${escapeHtml(url)}`);
       else if (r.duplicate) await send(env, chatId, `↩️ Already saved: <b>${escapeHtml(r.title ?? url)}</b>`);
-      else if (r.status === "ok") await send(env, chatId, `✅ Saved <b>${escapeHtml(r.title ?? url)}</b> <i>(${r.entityType})</i>`);
+      else if (r.status === "ok") await send(env, chatId, `✅ Saved <b>${escapeHtml(r.title ?? url)}</b> <i>(${r.itemKind ?? "link"})</i>`);
       else await send(env, chatId, `💾 Saved link (no metadata${r.error ? `: ${escapeHtml(r.error)}` : ""})`);
     } catch (e) {
       await send(env, chatId, `❌ Error: ${escapeHtml(e instanceof Error ? e.message : String(e))}`);
     }
+  }
+}
+
+async function saveLiveShow(text: string, chatId: number, env: Env): Promise<void> {
+  const input = parseLiveShow(text);
+  if (!input) return send(env, chatId, "⚠️ Add an artist name. Use: Artist | YYYY-MM-DD | Venue | City | Summary | Notes | tags");
+  try {
+    const lib = getLibrary(env);
+    await lib.seedLiveShows(liveShows);
+    await lib.createLiveShow(input);
+    return send(env, chatId, `✅ Saved live show: <b>${escapeHtml(input.artist)}</b>${input.venue ? ` at ${escapeHtml(input.venue)}` : ""}`);
+  } catch (e) {
+    return send(env, chatId, `❌ Error: ${escapeHtml(e instanceof Error ? e.message : String(e))}`);
   }
 }
 
@@ -132,7 +174,7 @@ async function saveText(kind: TextAddKind, text: string, chatId: number, env: En
   }
 }
 
-async function handleCommand(cmd: string, args: string, chatId: number, env: Env): Promise<void> {
+async function handleCommand(cmd: string, args: string, chatId: number, userId: number | undefined, env: Env): Promise<void> {
   const lib = getLibrary(env);
   switch (cmd) {
     case "start":
@@ -143,20 +185,27 @@ async function handleCommand(cmd: string, args: string, chatId: number, env: Env
       return send(
         env,
         chatId,
-        `📊 <b>${s.tracks}</b> tracks · <b>${s.artists}</b> artists · <b>${s.albums}</b> albums · <b>${s.books}</b> books\n<b>${s.movies}</b> movies · <b>${s.series}</b> series · <b>${s.anime}</b> anime · <b>${s.manga}</b> manga\n<b>${s.links}</b> saved links`,
+        `📊 <b>${s.tracks}</b> tracks · <b>${s.artists}</b> artists · <b>${s.albums}</b> albums · <b>${s.books}</b> books\n<b>${s.movies}</b> movies · <b>${s.series}</b> series · <b>${s.anime}</b> anime · <b>${s.manga}</b> manga · <b>${s.webtoons}</b> webtoons · <b>${s.comics}</b> comics\n<b>${s.links}</b> saved links`,
       );
     }
     case "add": {
       if (args) {
         const [kind, ...query] = args.split(/\s+/);
         if (isTextAddKind(kind) && query.length) return saveText(kind, query.join(" "), chatId, env);
+        if (kind === "live") return args.slice(kind.length).trim() ? saveLiveShow(args.slice(kind.length).trim(), chatId, env) : startLiveShow(chatId, userId, env);
       }
       return send(env, chatId, "What would you like to add?", addKeyboard());
     }
+    case "live":
+      return args ? saveLiveShow(args, chatId, env) : startLiveShow(chatId, userId, env);
+    case "cancel":
+      if (!userId) return send(env, chatId, "⚠️ I could not identify the sender.");
+      await lib.clearTelegramAddMode(chatId, userId);
+      return send(env, chatId, "Cancelled.");
     case "recent": {
       const rows = await lib.recent(10);
       if (!rows.length) return send(env, chatId, "Nothing saved yet.");
-      const lines = rows.map((r) => `• <b>${escapeHtml(String(r.title || r.url))}</b> <i>(${String(r.source)})</i>`);
+      const lines = rows.map((r) => `• <b>${escapeHtml(String(r.title || r.url))}</b> <i>(${String(r.provider)})</i>`);
       return send(env, chatId, lines.join("\n"));
     }
     case "search": {
@@ -191,12 +240,26 @@ async function handleCommand(cmd: string, args: string, chatId: number, env: Env
   }
 }
 
+function startLiveShow(chatId: number, userId: number | undefined, env: Env): Promise<void> {
+  if (!userId) return send(env, chatId, "⚠️ I could not identify the sender.");
+  return getLibrary(env).setTelegramAddMode(chatId, userId, "live")
+    .then(() => send(env, chatId, "Send: <b>Artist | YYYY-MM-DD | Venue | City | Summary | Notes | tags</b>\nOnly the artist is required; leave optional columns empty."));
+}
+
 async function handleCallback(callback: TgCallbackQuery, env: Env): Promise<void> {
-  await tgCall(env, "answerCallbackQuery", { callback_query_id: callback.id });
+  // Acknowledge the tap, but do not let a transient Telegram API failure prevent
+  // the selected add mode from being stored and its prompt from being sent.
+  await tgCall(env, "answerCallbackQuery", { callback_query_id: callback.id }).catch((error) => {
+    console.error("telegram callback acknowledgement failed", error);
+  });
   const chatId = callback.message?.chat.id;
   const kind = callback.data?.startsWith("add:") ? callback.data.slice(4) : "";
-  if (!chatId || !isTextAddKind(kind)) return;
-  await getLibrary(env).setTelegramAddKind(chatId, callback.from.id, kind);
+  if (!chatId || (kind !== "live" && !isTextAddKind(kind))) return;
+  if (kind === "live") {
+    await getLibrary(env).setTelegramAddMode(chatId, callback.from.id, kind);
+    return send(env, chatId, "Send: <b>Artist | YYYY-MM-DD | Venue | City | Summary | Notes | tags</b>\nOnly the artist is required; leave optional columns empty.");
+  }
+  await getLibrary(env).setTelegramAddMode(chatId, callback.from.id, kind);
   const label = ADD_KINDS.find((item) => item.kind === kind)?.label ?? kind;
   await send(env, chatId, `${label}: send me its title or name and I'll find the best match.`);
 }
@@ -228,8 +291,27 @@ export async function handleWebhook(
     ctx.waitUntil(handleMessage(msg, env).catch((e) => console.error("telegram handler error", e)));
   }
   const callback = update.callback_query;
-  if (callback?.message && (!allowed || String(callback.from.id) === allowed)) {
-    ctx.waitUntil(handleCallback(callback, env).catch((e) => console.error("telegram callback error", e)));
+  if (callback) {
+    const callbackAllowed = !allowed || String(callback.from.id) === allowed;
+    await recordCallbackDiagnostic(env, {
+      receivedAt: new Date().toISOString(), senderId: callback.from.id, data: callback.data ?? null,
+      hasMessage: !!callback.message, allowed: callbackAllowed, outcome: "received",
+    });
+    if (callback.message && callbackAllowed) {
+      ctx.waitUntil(handleCallback(callback, env)
+        .then(() => recordCallbackDiagnostic(env, {
+          receivedAt: new Date().toISOString(), senderId: callback.from.id, data: callback.data ?? null,
+          hasMessage: true, allowed: true, outcome: "handled",
+        }))
+        .catch(async (error) => {
+          console.error("telegram callback error", error);
+          await recordCallbackDiagnostic(env, {
+            receivedAt: new Date().toISOString(), senderId: callback.from.id, data: callback.data ?? null,
+            hasMessage: true, allowed: true, outcome: "error",
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }));
+    }
   }
   // Always 200 so Telegram stops retrying (ignored senders included).
   return new Response("ok");

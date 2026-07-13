@@ -5,9 +5,10 @@ import { fetchYouTube } from "./youtube";
 import { fetchBandcamp } from "./bandcamp";
 import { fetchGoodreads } from "./goodreads";
 import { fetchMyAnimeList } from "./myanimelist";
+import { fetchWebtoon } from "./webtoon";
 
 export { classify } from "./classify";
-export type { Classified, Fetched, EntityType, MediaKind, Source, SourceKind } from "./types";
+export type { Classified, Fetched, ItemKind, Provider, VisualKind } from "./types";
 
 /**
  * Fetch base metadata for a classified link. Returns null when the kind isn't
@@ -15,7 +16,7 @@ export type { Classified, Fetched, EntityType, MediaKind, Source, SourceKind } f
  * the caller still records the raw link.
  */
 export async function fetchMetadata(c: Classified, env: Env): Promise<Fetched | null> {
-  switch (c.source) {
+  switch (c.provider) {
     case "spotify":
       return fetchSpotify(c);
     case "youtube":
@@ -26,6 +27,8 @@ export async function fetchMetadata(c: Classified, env: Env): Promise<Fetched | 
       return fetchGoodreads(c);
     case "myanimelist":
       return fetchMyAnimeList(c);
+    case "webtoon":
+      return fetchWebtoon(c);
     default:
       return null;
   }

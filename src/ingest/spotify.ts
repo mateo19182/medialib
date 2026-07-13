@@ -17,7 +17,7 @@ function cleanTitle(title: string): string {
  *   album:  "Artist · album · 2013 · 26 songs"
  *   artist: "Artist · 1.8M monthly listeners."
  */
-export function parseSpotify(meta: Record<string, string>, kind: Classified["kind"]): Fetched | null {
+export function parseSpotify(meta: Record<string, string>, kind: "artist" | "album" | "track"): Fetched | null {
   const title = cleanTitle(meta["og:title"] ?? "");
   const desc = meta["og:description"] ?? "";
   const cover = meta["og:image"] || undefined;
@@ -27,13 +27,13 @@ export function parseSpotify(meta: Record<string, string>, kind: Classified["kin
 
   switch (kind) {
     case "artist":
-      return { entityType: "artist", name: title || "Unknown", imageUrl: cover };
+      return { kind: "artist", name: title || "Unknown", imageUrl: cover };
     case "album":
-      return { entityType: "album", title: title || "Unknown", artist: artist || "Unknown", year, coverUrl: cover };
+      return { kind: "album", title: title || "Unknown", artist: artist || "Unknown", year, coverUrl: cover };
     case "track": {
       const durSec = Number(meta["music:duration"]);
       return {
-        entityType: "track",
+        kind: "track",
         title: title || "Unknown",
         artist: artist || "Unknown",
         year,
@@ -41,12 +41,11 @@ export function parseSpotify(meta: Record<string, string>, kind: Classified["kin
         coverUrl: cover,
       };
     }
-    default:
-      return null; // playlist: not a catalog entity in M1
   }
 }
 
 export async function fetchSpotify(c: Classified): Promise<Fetched | null> {
+  if (c.itemKind !== "artist" && c.itemKind !== "album" && c.itemKind !== "track") return null;
   const html = await fetchText(c.url);
-  return parseSpotify(metaTags(html), c.kind);
+  return parseSpotify(metaTags(html), c.itemKind);
 }

@@ -6,7 +6,11 @@ import type { Env } from "./types";
  */
 export async function cacheImage(env: Env, url: string, key: string): Promise<string | null> {
   try {
-    const r = await fetch(url);
+    const hostname = new URL(url).hostname;
+    const headers = hostname === "webtoon-phinf.pstatic.net"
+      ? { referer: "https://www.webtoons.com/" }
+      : undefined;
+    const r = await fetch(url, { headers });
     if (!r.ok) return null;
     const contentType = r.headers.get("content-type") ?? "image/jpeg";
     await env.MEDIA.put(key, await r.arrayBuffer(), { httpMetadata: { contentType } });
