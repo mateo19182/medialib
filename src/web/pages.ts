@@ -30,18 +30,26 @@ function layout(title: string, body: HtmlEscapedString | Promise<HtmlEscapedStri
       <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta name="theme-color" content="#0f172a" />
+        <meta name="mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+        <meta name="apple-mobile-web-app-title" content="medialib" />
         <title>${title}</title>
         <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+        <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+        <link rel="manifest" href="/app.webmanifest" />
         <link rel="stylesheet" href="/assets/app.css" />
         <script src="/assets/htmx.min.js" defer></script>
+        <script src="/assets/app.js" defer></script>
       </head>
-      <body class="bg-slate-50 text-slate-800 min-h-screen antialiased">
-        <nav class="bg-slate-900 text-white sticky top-0 z-20">
-          <div class="max-w-6xl mx-auto px-6 min-h-14 py-2 flex flex-wrap items-center gap-x-8 gap-y-2">
+      <body class="bg-slate-50 text-slate-800 min-h-screen antialiased overflow-x-hidden">
+        <nav class="app-nav bg-slate-900 text-white sticky top-0 z-20" aria-label="Primary navigation">
+          <div class="max-w-6xl mx-auto px-4 sm:px-6 min-h-14 py-2 flex items-center gap-3 lg:gap-8">
             <a href="/" class="font-semibold tracking-tight flex items-center gap-2 shrink-0">
               <span class="inline-block w-2 h-2 rounded-full bg-emerald-400"></span>medialib
             </a>
-            <div class="flex gap-5 text-sm text-slate-300 whitespace-nowrap">
+            <div class="hidden lg:flex gap-5 text-sm text-slate-300 whitespace-nowrap">
               <a href="/library" class="hover:text-white">Music</a>
               <a href="/books" class="hover:text-white">Books</a>
               <a href="/movies" class="hover:text-white">Movies</a>
@@ -55,13 +63,32 @@ function layout(title: string, body: HtmlEscapedString | Promise<HtmlEscapedStri
               <a href="https://links.m19182.dev" target="_blank" rel="noopener noreferrer" class="hover:text-white">Links</a>
               <a href="/add" class="hover:text-white">Add</a>
             </div>
-            <form action="/search" method="get" class="ml-auto flex min-w-48 flex-1 sm:flex-none sm:w-64">
+            <form action="/search" method="get" class="ml-auto hidden lg:flex min-w-48 w-64">
               <input name="q" type="search" placeholder="Search library"
                 class="w-full rounded-lg border border-white/10 bg-white/10 px-3 py-1.5 text-sm text-white placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-400/40" />
             </form>
+            <div class="ml-auto flex items-center gap-1 lg:hidden text-sm">
+              <a href="/search" class="min-h-10 px-3 inline-flex items-center text-slate-200 hover:text-white">Search</a>
+              <a href="/add" class="min-h-10 px-3 inline-flex items-center rounded-lg bg-emerald-500 font-medium text-slate-950 hover:bg-emerald-400">Add</a>
+            </div>
+          </div>
+          <div class="nav-scroll lg:hidden overflow-x-auto border-t border-white/10" aria-label="Library sections">
+            <div class="max-w-6xl mx-auto px-4 sm:px-6 flex gap-5 text-sm text-slate-300 whitespace-nowrap">
+              <a href="/library">Music</a>
+              <a href="/books">Books</a>
+              <a href="/movies">Movies</a>
+              <a href="/series">Series</a>
+              <a href="/anime">Anime</a>
+              <a href="/manga">Manga</a>
+              <a href="/webtoons">Webtoons</a>
+              <a href="/comics">Comics</a>
+              <a href="/live">Live</a>
+              <a href="/youtube-sync">Sync</a>
+              <a href="https://links.m19182.dev" target="_blank" rel="noopener noreferrer">Links</a>
+            </div>
           </div>
         </nav>
-        <main class="max-w-6xl mx-auto px-6 py-8">${body}</main>
+        <main class="app-main max-w-6xl mx-auto px-4 sm:px-6 py-5 sm:py-8">${body}</main>
       </body>
     </html>`;
 }
@@ -165,7 +192,7 @@ export function dashboard(stats: LibraryStats) {
         <h1 class="text-3xl font-bold tracking-tight">Your library</h1>
         <p class="text-slate-500 mt-1">Save music, books, anime, manga, webtoons, and comics by link.</p>
       </div>
-      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 mb-3">${cards}</div>
+      <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2 sm:gap-3 mb-3">${cards}</div>
       ${stats.pending > 0
         ? html`<p class="text-xs text-amber-600 mb-8">⏳ ${stats.pending} item${stats.pending === 1 ? "" : "s"} enriching in the background…</p>`
         : html`<div class="mb-8"></div>`}
@@ -328,7 +355,7 @@ export function addPage(result?: SaveResult) {
           <a href="/live/add" class="shrink-0 border border-emerald-700 px-3 py-2 rounded-lg text-sm font-medium text-emerald-700 hover:bg-emerald-50">Add live show</a>
         </div>
         ${banner}
-        <form method="post" action="/add" class="bg-white border border-slate-200 rounded-xl p-5 space-y-3">
+        <form method="post" action="/add" class="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-3">
           <div class="grid sm:grid-cols-[10rem_1fr] gap-3">
             <select name="kind" required class="border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white">
               <option value="artist">Artist</option><option value="album">Album</option><option value="track">Track</option>
@@ -346,9 +373,9 @@ export function addPage(result?: SaveResult) {
           <p class="text-xs text-slate-500">We'll search the best available catalogue first, then save your entry even when no match is found.</p>
         </form>
         <div class="flex items-center gap-3 my-6 text-xs text-slate-400"><span class="h-px bg-slate-200 flex-1"></span>or add by link<span class="h-px bg-slate-200 flex-1"></span></div>
-        <form method="post" action="/add" class="flex gap-2">
+        <form method="post" action="/add" class="flex flex-col sm:flex-row gap-2">
           <input name="url" type="url" required placeholder="https://open.spotify.com/track/..."
-            class="flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900/10" />
+            class="min-w-0 flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900/10" />
           <button class="bg-slate-900 text-white px-4 py-2 rounded-lg text-sm hover:bg-slate-700">Save</button>
         </form>
       </div>
@@ -363,7 +390,7 @@ export function editEntryPage(title: string, back: string, action: string, field
     `Edit ${title} · medialib`,
     html`<div class="max-w-2xl"><a href="${back}" class="text-sm text-slate-500 hover:underline">← Cancel</a>
       <h1 class="text-2xl font-bold tracking-tight mt-3 mb-6">Edit ${title}</h1>
-      <form method="post" action="${action}" class="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
+      <form method="post" action="${action}" class="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-4">
         ${fields.map((field) => html`<label class="block text-sm font-medium text-slate-700">${field.label}
           ${field.multiline
             ? html`<textarea name="${field.name}" rows="4" class="mt-1 w-full border border-slate-200 rounded-lg px-3 py-2 text-sm">${field.value ?? ""}</textarea>`
@@ -394,7 +421,7 @@ function trackRows(tracks: TrackRow[]) {
   return html`<div class="bg-white border border-slate-200 rounded-xl divide-y divide-slate-100">
     ${tracks.map(
       (t) => html`
-        <div class="grid grid-cols-[1fr_auto] md:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,0.8fr)_auto] items-center gap-3 px-4 py-2.5">
+        <div class="grid grid-cols-[minmax(0,1fr)_auto] md:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,0.8fr)_auto] items-center gap-2 sm:gap-3 px-3 sm:px-4 py-3 md:py-2.5">
           <span class="min-w-0">
             <a href="/track/${t.id}" class="block text-sm font-medium truncate hover:underline">${t.title}</a>
             <span class="block md:hidden text-xs text-slate-400 truncate">${artistText(t)}${t.album ? ` · ${t.album}` : ""}</span>
@@ -413,10 +440,10 @@ function trackRows(tracks: TrackRow[]) {
 }
 
 function albumGrid(albums: AlbumRow[]) {
-  return html`<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
+  return html`<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2.5 sm:gap-4">
     ${albums.map(
       (al) => html`
-        <div class="bg-white border border-slate-200 rounded-xl p-3">
+        <div class="bg-white border border-slate-200 rounded-xl p-2.5 sm:p-3 min-w-0">
           <a href="/album/${al.id}" class="block">
             ${mediaSrc(al.cover_key, al.cover_url)
               ? html`<img loading="lazy" decoding="async" src="${mediaSrc(al.cover_key, al.cover_url)}" alt="" class="w-full aspect-square rounded-lg object-cover mb-2 bg-slate-100" />`
@@ -424,7 +451,7 @@ function albumGrid(albums: AlbumRow[]) {
             <div class="text-sm font-medium truncate">${al.title}</div>
           </a>
           ${al.artist_id && al.artist ? html`<a href="/artist/${al.artist_id}" class="block text-xs text-slate-500 truncate hover:underline">${al.artist}</a>` : ""}
-          <div class="flex items-center justify-between mt-1 gap-2">
+          <div class="rating-compact flex flex-wrap items-center justify-between mt-1 gap-x-2 gap-y-1">
             <span class="text-xs text-slate-400">${[al.year, al.tracks ? `${al.tracks} tracks` : ""].filter(Boolean).join(" · ")}</span>
             ${stars("album", al.id, al.rating)}
           </div>
@@ -480,10 +507,10 @@ const STATUS_LABEL: Record<string, string> = { want: "Want to read", reading: "R
 export function booksPage(page: PageResult<BookRow>) {
   const books = page.items;
   const body = books.length
-    ? html`<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
+    ? html`<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2.5 sm:gap-4">
         ${books.map(
           (b) => html`
-            <a href="/book/${b.id}" class="block bg-white border border-slate-200 rounded-xl p-3 hover:border-slate-300">
+            <a href="/book/${b.id}" class="block min-w-0 bg-white border border-slate-200 rounded-xl p-2.5 sm:p-3 hover:border-slate-300">
               ${mediaSrc(b.cover_key, b.cover_url)
                 ? html`<img loading="lazy" decoding="async" src="${mediaSrc(b.cover_key, b.cover_url)}" alt="" class="w-full aspect-[2/3] rounded-lg object-cover mb-2 bg-slate-100" />`
                 : html`<div class="w-full aspect-[2/3] rounded-lg bg-slate-100 mb-2 flex items-center justify-center text-slate-300 text-2xl">📖</div>`}
@@ -511,15 +538,15 @@ export function mediaListPage(kind: VisualKind, page: PageResult<MediaRow>) {
   const items = page.items;
   const label = MEDIA_LABELS[kind];
   const body = items.length
-    ? html`<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
+    ? html`<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2.5 sm:gap-4">
         ${items.map(
           (m) => html`
-            <a href="/item/${m.id}" class="block bg-white border border-slate-200 rounded-xl p-3 hover:border-slate-300">
+            <a href="/item/${m.id}" class="block min-w-0 bg-white border border-slate-200 rounded-xl p-2.5 sm:p-3 hover:border-slate-300">
               ${mediaSrc(m.cover_key, m.cover_url)
                 ? html`<img loading="lazy" decoding="async" src="${mediaSrc(m.cover_key, m.cover_url)}" alt="" class="w-full aspect-[2/3] rounded-lg object-cover mb-2 bg-slate-100" />`
                 : html`<div class="w-full aspect-[2/3] rounded-lg bg-slate-100 mb-2 flex items-center justify-center text-slate-300 text-2xl">${label.fallback}</div>`}
               <div class="text-sm font-medium leading-tight line-clamp-2">${m.title}</div>
-              <div class="flex items-center justify-between mt-1 gap-2">
+              <div class="rating-compact flex flex-wrap items-center justify-between mt-1 gap-x-2 gap-y-1">
                 ${m.year ? html`<span class="text-xs text-slate-400">${m.year}</span>` : html`<span></span>`}
                 ${stars("media", m.id, m.rating)}
               </div>
@@ -545,7 +572,7 @@ export function mediaItemPage(item: MediaDetail) {
     html`
       <a href="/${item.kind === "movie" ? "movies" : item.kind === "webtoon" ? "webtoons" : item.kind === "comic" ? "comics" : item.kind}" class="text-sm text-slate-500 hover:underline">← ${label.title}</a>
       <div class="flex flex-col sm:flex-row gap-6 mt-3">
-        <div class="shrink-0 w-40">
+        <div class="shrink-0 w-40 mx-auto sm:mx-0">
           ${cover
             ? html`<img loading="lazy" decoding="async" src="${cover}" alt="" class="w-40 rounded-xl object-cover bg-slate-100" />`
             : html`<div class="w-40 aspect-[2/3] rounded-xl bg-slate-100 flex items-center justify-center text-slate-300 text-3xl">${label.fallback}</div>`}
@@ -555,7 +582,7 @@ export function mediaItemPage(item: MediaDetail) {
           <a href="/edit/media/${item.id}" class="inline-block mt-2 text-sm text-emerald-700 hover:underline">Edit</a>
           ${meta ? html`<p class="text-sm text-slate-500 mt-1">${meta}</p>` : ""}
           ${listMeta ? html`<p class="text-sm text-emerald-700 mt-1">${listMeta}</p>` : ""}
-          <div class="flex items-center gap-3 mt-4">
+          <div class="flex flex-wrap items-center gap-3 mt-4">
             <span class="text-sm text-slate-600 flex items-center gap-2">Rating ${stars("media", item.id, item.rating)}</span>
             ${item.provider_url ? html`<a href="${item.provider_url}" target="_blank" rel="noopener" class="text-sm text-emerald-600 hover:underline">${item.provider ?? "source"}</a>` : ""}
           </div>
@@ -615,7 +642,7 @@ export function liveShowsPage(shows: LiveShow[], artistLinks = new Map<string, {
                   const meta = [show.dateLabel, show.venue, show.city].filter(Boolean).join(" · ");
                   const artist = artistLinks.get(show.slug);
                   return html`
-                    <article id="${show.slug}" class="bg-white border border-slate-200 rounded-xl p-5">
+                    <article id="${show.slug}" class="bg-white border border-slate-200 rounded-xl p-4 sm:p-5">
                       <div class="flex flex-col md:flex-row md:items-start md:justify-between gap-3">
                         <div class="min-w-0">
                           <h3 class="text-lg font-semibold tracking-tight text-slate-900">${artist ? html`<a href="/artist/${artist.id}" class="hover:underline">${show.artist}</a>` : show.artist}</h3>
@@ -657,7 +684,7 @@ export function bookPage(b: BookDetail) {
     html`
       <a href="/books" class="text-sm text-slate-500 hover:underline">← Books</a>
       <div class="flex flex-col sm:flex-row gap-6 mt-3">
-        <div class="shrink-0 w-40">
+        <div class="shrink-0 w-40 mx-auto sm:mx-0">
           ${cover
             ? html`<img loading="lazy" decoding="async" src="${cover}" alt="" class="w-40 rounded-xl object-cover bg-slate-100" />`
             : html`<div class="w-40 aspect-[2/3] rounded-xl bg-slate-100 flex items-center justify-center text-slate-300 text-3xl">📖</div>`}
@@ -666,7 +693,7 @@ export function bookPage(b: BookDetail) {
           <h1 class="text-2xl font-bold tracking-tight">${b.title}</h1>
           <a href="/edit/book/${b.id}" class="inline-block mt-2 text-sm text-emerald-700 hover:underline">Edit</a>
           ${meta ? html`<p class="text-sm text-slate-500 mt-1">${meta}</p>` : ""}
-          <div class="flex items-center gap-4 mt-4">
+          <div class="flex flex-col items-start sm:flex-row sm:items-center gap-3 sm:gap-4 mt-4">
             <label class="text-sm text-slate-600">Status
               <select name="status" hx-post="/book/${b.id}/status" hx-trigger="change" hx-swap="none"
                 class="ml-2 border border-slate-200 rounded-lg px-2 py-1 text-sm">
@@ -691,7 +718,7 @@ export function albumPage(detail: AlbumDetail) {
     html`
       <a href="${musicHref("albums")}" class="text-sm text-slate-500 hover:underline">← Albums</a>
       <div class="flex flex-col sm:flex-row gap-6 mt-3 mb-8">
-        <div class="shrink-0 w-40">
+        <div class="shrink-0 w-40 mx-auto sm:mx-0">
           ${cover
             ? html`<img loading="lazy" decoding="async" src="${cover}" alt="" class="w-40 aspect-square rounded-xl object-cover bg-slate-100" />`
             : html`<div class="w-40 aspect-square rounded-xl bg-slate-100 flex items-center justify-center text-slate-300 text-3xl">♪</div>`}
@@ -787,9 +814,9 @@ export function searchPage(query: string, results: SearchResult[]) {
     html`
       <div class="max-w-2xl">
         <h1 class="text-2xl font-bold tracking-tight mb-5">Search</h1>
-        <form action="/search" method="get" class="flex gap-2 mb-5">
+        <form action="/search" method="get" class="flex flex-col sm:flex-row gap-2 mb-5">
           <input name="q" type="search" value="${q}" autofocus placeholder="Search library"
-            class="flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900/10" />
+            class="min-w-0 flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-900/10" />
           <button class="bg-slate-900 text-white px-4 py-2 rounded-lg text-sm hover:bg-slate-700">Search</button>
         </form>
         <div class="bg-white border border-slate-200 rounded-xl divide-y divide-slate-100">${rows}</div>

@@ -1,3 +1,69 @@
 @import "tailwindcss";
 
 @source "./pages.ts";
+
+@layer base {
+  html {
+    color-scheme: light;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+  }
+
+  button,
+  a,
+  select {
+    touch-action: manipulation;
+  }
+
+  button:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+}
+
+.nav-scroll {
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.nav-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.nav-scroll a {
+  display: inline-flex;
+  min-height: 2.75rem;
+  align-items: center;
+}
+
+.stars button {
+  min-width: 1.35rem;
+  min-height: 2rem;
+}
+
+.rating-compact .stars button {
+  min-width: 1rem;
+  min-height: 1.5rem;
+}
+
+@media (max-width: 639px) {
+  input,
+  select,
+  textarea {
+    font-size: 1rem;
+  }
+
+  .app-nav {
+    padding-top: env(safe-area-inset-top);
+  }
+
+  .app-main {
+    padding-bottom: calc(1.5rem + env(safe-area-inset-bottom));
+  }
+}
