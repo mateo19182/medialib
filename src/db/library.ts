@@ -226,7 +226,7 @@ const pickSort = (sorts: Record<string, string>, key: string | undefined): strin
   sorts[key ?? ""] ?? Object.values(sorts)[0];
 
 /** list_status values that count as "finished" for the unwatched/unread filter. */
-const DONE_STATUSES = ["completed", "watched", "read", "finished", "dropped"];
+const DONE_STATUSES = ["completed", "watched", "read", "finished", "dropped", "did not finish"];
 
 export interface OAuthTokenRow {
   provider: string;
