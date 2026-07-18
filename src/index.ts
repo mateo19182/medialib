@@ -160,10 +160,12 @@ app.get("/library", async (c) => {
   const lib = getLibrary(c.env);
   const page = pageNumber(c.req.query("page"));
   const offset = (page - 1) * PAGE_SIZE;
-  const result = view === "artists" ? await lib.listArtists(PAGE_SIZE, offset)
-    : view === "albums" ? await lib.listAlbums(PAGE_SIZE, offset)
-      : await lib.listTracks(PAGE_SIZE, offset);
-  return c.html(libraryPage(view, result));
+  const sort = c.req.query("sort");
+  const fav = c.req.query("fav") === "1";
+  const result = view === "artists" ? await lib.listArtists(PAGE_SIZE, offset, sort)
+    : view === "albums" ? await lib.listAlbums(PAGE_SIZE, offset, sort)
+      : await lib.listTracks(PAGE_SIZE, offset, { sort, favorites: fav });
+  return c.html(libraryPage(view, result, { sort, fav }));
 });
 
 app.get("/artist/:id", async (c) => {
@@ -215,7 +217,10 @@ app.post("/add", async (c) => {
 
 app.get("/books", async (c) => {
   const page = pageNumber(c.req.query("page"));
-  return c.html(booksPage(await getLibrary(c.env).listBooks(PAGE_SIZE, (page - 1) * PAGE_SIZE)));
+  const sort = c.req.query("sort");
+  const status = c.req.query("status") || undefined;
+  const result = await getLibrary(c.env).listBooks(PAGE_SIZE, (page - 1) * PAGE_SIZE, { sort, status });
+  return c.html(booksPage(result, { sort, status }));
 });
 
 app.get("/live", async (c) => {
@@ -271,9 +276,15 @@ const MEDIA_ROUTES: Record<string, VisualKind> = { movies: "movie", series: "ser
 
 for (const [path, kind] of Object.entries(MEDIA_ROUTES)) {
   app.get(`/${path}`, async (c) => {
+    const lib = getLibrary(c.env);
     const page = pageNumber(c.req.query("page"));
-    const items = await getLibrary(c.env).listMedia(kind, PAGE_SIZE, (page - 1) * PAGE_SIZE);
-    return c.html(mediaListPage(kind, items));
+    const sort = c.req.query("sort");
+    const status = c.req.query("status") || undefined;
+    const [items, statuses] = await Promise.all([
+      lib.listMedia(kind, PAGE_SIZE, (page - 1) * PAGE_SIZE, { sort, status }),
+      lib.mediaStatuses(kind),
+    ]);
+    return c.html(mediaListPage(kind, items, { sort, status }, statuses));
   });
 }
 

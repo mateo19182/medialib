@@ -318,6 +318,55 @@ export function youtubeSyncPage(playlists: YouTubeSyncPlaylist[], run: YouTubeSy
   );
 }
 
+/** Query state shared by the list pages: sort key, status filter, favorites-only. */
+export interface ListQuery {
+  sort?: string;
+  status?: string;
+  fav?: boolean;
+}
+
+/** Build "path?k=v" keeping only truthy params, for pager links. */
+function withQuery(path: string, params: Record<string, string | undefined>) {
+  const parts = Object.entries(params)
+    .filter(([, value]) => value)
+    .map(([key, value]) => `${key}=${encodeURIComponent(value as string)}`);
+  return parts.length ? `${path}?${parts.join("&")}` : path;
+}
+
+const filterSelect = (name: string, label: string, options: [string, string][], current: string) =>
+  html`<label class="inline-flex items-center gap-1.5 text-xs text-slate-500">${label}
+    <select name="${name}" onchange="this.form.requestSubmit ? this.form.requestSubmit() : this.form.submit()"
+      class="border border-slate-200 rounded-lg bg-white px-2 py-1.5 text-sm text-slate-700 min-h-9">
+      ${options.map(([value, text]) => html`<option value="${value}" ${current === value ? "selected" : ""}>${text}</option>`)}
+    </select>
+  </label>`;
+
+/** Sort/filter toolbar for list pages. Selects submit the GET form on change. */
+function filterBar(
+  path: string,
+  query: ListQuery,
+  opts: {
+    sorts: [string, string][];
+    statuses?: [string, string][];
+    statusLabel?: string;
+    favToggle?: boolean;
+    hidden?: Record<string, string>;
+  },
+) {
+  const sort = opts.sorts.some(([value]) => value === query.sort) ? (query.sort as string) : opts.sorts[0][0];
+  return html`<form method="get" action="${path}" class="flex flex-wrap items-center gap-x-3 gap-y-2 mb-5">
+    ${Object.entries(opts.hidden ?? {}).map(([name, value]) => html`<input type="hidden" name="${name}" value="${value}" />`)}
+    ${filterSelect("sort", "Sort", opts.sorts, sort)}
+    ${opts.statuses ? filterSelect("status", opts.statusLabel ?? "Status", [["", "All"], ...opts.statuses], query.status ?? "") : ""}
+    ${opts.favToggle
+      ? html`<label class="inline-flex items-center gap-1.5 text-sm text-slate-600 border border-slate-200 rounded-lg bg-white px-2.5 min-h-9 cursor-pointer ${query.fav ? "border-rose-200 bg-rose-50 text-rose-600" : ""}">
+          <input type="checkbox" name="fav" value="1" ${query.fav ? "checked" : ""} onchange="this.form.requestSubmit ? this.form.requestSubmit() : this.form.submit()" class="accent-rose-500" /> ♥ Favorites
+        </label>`
+      : ""}
+    <noscript><button class="border border-slate-200 rounded-lg px-3 py-1.5 text-sm">Apply</button></noscript>
+  </form>`;
+}
+
 function pager(page: PageResult<unknown>, path: string) {
   if (page.total <= page.limit) return "";
   const current = Math.floor(page.offset / page.limit) + 1;
@@ -461,7 +510,13 @@ function albumGrid(albums: AlbumRow[]) {
   </div>`;
 }
 
-export function libraryPage(view: MusicView, data: PageResult<ArtistSummary | AlbumRow | TrackRow>) {
+const MUSIC_SORTS: Record<MusicView, [string, string][]> = {
+  artists: [["name", "Name A–Z"], ["recent", "Recently added"], ["tracks", "Most tracks"], ["albums", "Most albums"]],
+  albums: [["title", "Title A–Z"], ["year", "Newest release"], ["rating", "Top rated"], ["recent", "Recently added"]],
+  tracks: [["title", "Title A–Z"], ["artist", "Artist A–Z"], ["rating", "Top rated"], ["recent", "Recently added"]],
+};
+
+export function libraryPage(view: MusicView, data: PageResult<ArtistSummary | AlbumRow | TrackRow>, query: ListQuery = {}) {
   let body: HtmlEscapedString | Promise<HtmlEscapedString>;
   if (view === "tracks") {
     const tracks = data.items as TrackRow[];
@@ -489,6 +544,11 @@ export function libraryPage(view: MusicView, data: PageResult<ArtistSummary | Al
       </div>`
     : html`<p class="text-slate-500 text-sm">No music yet. <a class="underline" href="/add">Add a link</a>.</p>`;
   }
+  const pagerPath = withQuery("/library", {
+    view: view === "artists" ? undefined : view,
+    sort: query.sort,
+    fav: view === "tracks" && query.fav ? "1" : undefined,
+  });
   return layout(
     "Music · medialib",
     html`<div class="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3 mb-5">
@@ -498,13 +558,26 @@ export function libraryPage(view: MusicView, data: PageResult<ArtistSummary | Al
         </div>
       </div>
       ${musicTabs(view)}
-      ${body}${pager(data, musicHref(view))}`,
+      ${filterBar("/library", query, {
+        sorts: MUSIC_SORTS[view],
+        favToggle: view === "tracks",
+        hidden: view === "artists" ? {} : { view },
+      })}
+      ${body}${pager(data, pagerPath)}`,
   );
 }
 
 const STATUS_LABEL: Record<string, string> = { want: "Want to read", reading: "Reading", read: "Read" };
 
-export function booksPage(page: PageResult<BookRow>) {
+const BOOK_SORT_OPTIONS: [string, string][] = [
+  ["title", "Title A–Z"],
+  ["author", "Author A–Z"],
+  ["year", "Newest"],
+  ["rating", "Top rated"],
+  ["recent", "Recently added"],
+];
+
+export function booksPage(page: PageResult<BookRow>, query: ListQuery = {}) {
   const books = page.items;
   const body = books.length
     ? html`<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2.5 sm:gap-4">
@@ -522,7 +595,15 @@ export function booksPage(page: PageResult<BookRow>) {
         )}
       </div>`
     : html`<p class="text-slate-500 text-sm">No books yet. Send a Goodreads link to the bot or use <a class="underline" href="/add">Add</a>.</p>`;
-  return layout("Books · medialib", html`<h1 class="text-2xl font-bold tracking-tight mb-6">Books</h1>${body}${pager(page, "/books")}`);
+  return layout(
+    "Books · medialib",
+    html`<h1 class="text-2xl font-bold tracking-tight mb-4">Books</h1>
+      ${filterBar("/books", query, {
+        sorts: BOOK_SORT_OPTIONS,
+        statuses: Object.entries(STATUS_LABEL),
+      })}
+      ${body}${pager(page, withQuery("/books", { sort: query.sort, status: query.status }))}`,
+  );
 }
 
 const MEDIA_LABELS: Record<VisualKind, { title: string; empty: string; fallback: string }> = {
@@ -534,7 +615,17 @@ const MEDIA_LABELS: Record<VisualKind, { title: string; empty: string; fallback:
   comic: { title: "Comics", empty: "No comics yet.", fallback: "CM" },
 };
 
-export function mediaListPage(kind: VisualKind, page: PageResult<MediaRow>) {
+const MEDIA_SORT_OPTIONS: [string, string][] = [
+  ["title", "Title A–Z"],
+  ["year", "Newest"],
+  ["rating", "Top rated"],
+  ["score", "Top score"],
+  ["recent", "Recently added"],
+];
+
+const titleCase = (value: string) => value.charAt(0).toUpperCase() + value.slice(1);
+
+export function mediaListPage(kind: VisualKind, page: PageResult<MediaRow>, query: ListQuery = {}, statuses: string[] = []) {
   const items = page.items;
   const label = MEDIA_LABELS[kind];
   const body = items.length
@@ -559,7 +650,16 @@ export function mediaListPage(kind: VisualKind, page: PageResult<MediaRow>) {
       </div>`
     : html`<p class="text-slate-500 text-sm">${label.empty} <a class="underline" href="/add">Add a link</a>.</p>`;
   const path = kind === "movie" ? "/movies" : kind === "series" ? "/series" : kind === "webtoon" ? "/webtoons" : kind === "comic" ? "/comics" : `/${kind}`;
-  return layout(`${label.title} · medialib`, html`<h1 class="text-2xl font-bold tracking-tight mb-6">${label.title}</h1>${body}${pager(page, path)}`);
+  const statusOptions: [string, string][] = [
+    ["todo", "Not finished"],
+    ...statuses.map((status): [string, string] => [status, titleCase(status)]),
+  ];
+  return layout(
+    `${label.title} · medialib`,
+    html`<h1 class="text-2xl font-bold tracking-tight mb-4">${label.title}</h1>
+      ${filterBar(path, query, { sorts: MEDIA_SORT_OPTIONS, statuses: statusOptions })}
+      ${body}${pager(page, withQuery(path, { sort: query.sort, status: query.status }))}`,
+  );
 }
 
 export function mediaItemPage(item: MediaDetail) {

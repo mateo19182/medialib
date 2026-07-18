@@ -189,6 +189,45 @@ export interface PageResult<T> {
   offset: number;
 }
 
+/** Whitelisted ORDER BY clauses per list; unknown keys fall back to the first entry. */
+const ARTIST_SORTS: Record<string, string> = {
+  name: "a.name COLLATE NOCASE",
+  tracks: "tracks DESC, a.name COLLATE NOCASE",
+  albums: "albums DESC, a.name COLLATE NOCASE",
+  recent: "a.id DESC",
+};
+const ALBUM_SORTS: Record<string, string> = {
+  title: "al.title COLLATE NOCASE",
+  year: "al.year IS NULL, al.year DESC, al.title COLLATE NOCASE",
+  rating: "al.rating IS NULL, al.rating DESC, al.title COLLATE NOCASE",
+  recent: "al.id DESC",
+};
+const TRACK_SORTS: Record<string, string> = {
+  title: "t.title COLLATE NOCASE",
+  artist: "artists COLLATE NOCASE, t.title COLLATE NOCASE",
+  rating: "t.rating IS NULL, t.rating DESC, t.title COLLATE NOCASE",
+  recent: "t.id DESC",
+};
+const BOOK_SORTS: Record<string, string> = {
+  title: "b.title COLLATE NOCASE",
+  author: "author IS NULL, author COLLATE NOCASE, b.title COLLATE NOCASE",
+  year: "b.year IS NULL, b.year DESC, b.title COLLATE NOCASE",
+  rating: "b.rating IS NULL, b.rating DESC, b.title COLLATE NOCASE",
+  recent: "b.id DESC",
+};
+const MEDIA_SORTS: Record<string, string> = {
+  title: "title COLLATE NOCASE",
+  year: "year IS NULL, year DESC, title COLLATE NOCASE",
+  rating: "rating IS NULL, rating DESC, title COLLATE NOCASE",
+  score: "personal_score IS NULL, personal_score DESC, title COLLATE NOCASE",
+  recent: "created_at DESC, id DESC",
+};
+const pickSort = (sorts: Record<string, string>, key: string | undefined): string =>
+  sorts[key ?? ""] ?? Object.values(sorts)[0];
+
+/** list_status values that count as "finished" for the unwatched/unread filter. */
+const DONE_STATUSES = ["completed", "watched", "read", "finished", "dropped"];
+
 export interface OAuthTokenRow {
   provider: string;
   access_token: string;
@@ -796,7 +835,7 @@ export class LibraryDb {
   }
 
   /** Artists that have at least one album or track, with counts, for /library. */
-  listArtists(limit = 50, offset = 0): Promise<PageResult<ArtistSummary>> {
+  listArtists(limit = 50, offset = 0, sort?: string): Promise<PageResult<ArtistSummary>> {
     const sql =
       `WITH album_counts AS (
          SELECT artist_id, COUNT(*) AS albums
@@ -822,7 +861,7 @@ export class LibraryDb {
        LEFT JOIN album_counts ac ON ac.artist_id = a.id
        LEFT JOIN track_counts tc ON tc.artist_id = a.id
        WHERE a.artist_type = 'musician' AND (ac.artist_id IS NOT NULL OR tc.artist_id IS NOT NULL)
-       ORDER BY a.name COLLATE NOCASE`;
+       ORDER BY ${pickSort(ARTIST_SORTS, sort)}`;
     return this.page<ArtistSummary>(sql, `WITH active_artists AS (
       SELECT artist_id FROM albums WHERE artist_id IS NOT NULL
       UNION
@@ -839,19 +878,20 @@ export class LibraryDb {
   }
 
   /** Albums with artist and track counts, for the music album view. */
-  listAlbums(limit = 50, offset = 0): Promise<PageResult<AlbumRow>> {
+  listAlbums(limit = 50, offset = 0, sort?: string): Promise<PageResult<AlbumRow>> {
     return this.page<AlbumRow>(
       `SELECT al.id, al.title, al.year, al.cover_url, al.cover_key, al.rating,
               al.artist_id, a.name AS artist,
               (SELECT COUNT(*) FROM tracks t WHERE t.album_id = al.id) AS tracks
        FROM albums al
        LEFT JOIN artists a ON a.id = al.artist_id
-       ORDER BY al.title COLLATE NOCASE`, "SELECT COUNT(*) AS value FROM albums", [], limit, offset,
+       ORDER BY ${pickSort(ALBUM_SORTS, sort)}`, "SELECT COUNT(*) AS value FROM albums", [], limit, offset,
     );
   }
 
   /** Tracks with album and disaggregated artist display, for the music track view. */
-  listTracks(limit = 50, offset = 0): Promise<PageResult<TrackRow>> {
+  listTracks(limit = 50, offset = 0, opts: { sort?: string; favorites?: boolean } = {}): Promise<PageResult<TrackRow>> {
+    const where = opts.favorites ? "WHERE t.favorite = 1" : "";
     return this.page<TrackRow>(
       `SELECT t.id, t.title, t.duration_ms, t.album_id, t.artist_id, t.rating, t.favorite,
               al.title AS album, a.name AS artist,
@@ -869,7 +909,8 @@ export class LibraryDb {
        FROM tracks t
        LEFT JOIN albums al ON al.id = t.album_id
        LEFT JOIN artists a ON a.id = t.artist_id
-       ORDER BY t.title COLLATE NOCASE`, "SELECT COUNT(*) AS value FROM tracks", [], limit, offset,
+       ${where}
+       ORDER BY ${pickSort(TRACK_SORTS, opts.sort)}`, `SELECT COUNT(*) AS value FROM tracks t ${where}`, [], limit, offset,
     );
   }
 
@@ -1014,23 +1055,45 @@ export class LibraryDb {
   }
 
   /** All books with their primary author, for /books. */
-  listBooks(limit = 50, offset = 0): Promise<PageResult<BookRow>> {
+  listBooks(limit = 50, offset = 0, opts: { sort?: string; status?: string } = {}): Promise<PageResult<BookRow>> {
+    const status = READING_STATUSES.includes(opts.status as ReadingStatus) ? (opts.status as ReadingStatus) : null;
+    const where = status ? "WHERE b.reading_status = ?" : "";
+    const args: SqlValue[] = status ? [status] : [];
     return this.page<BookRow>(
       `SELECT b.id, b.title, b.cover_url, b.cover_key, b.year, b.reading_status,
               (SELECT a.name FROM book_authors ba JOIN authors a ON a.id = ba.author_id
                WHERE ba.book_id = b.id ORDER BY ba.position LIMIT 1) AS author
-       FROM books b ORDER BY b.title COLLATE NOCASE`, "SELECT COUNT(*) AS value FROM books", [], limit, offset,
+       FROM books b ${where} ORDER BY ${pickSort(BOOK_SORTS, opts.sort)}`,
+      `SELECT COUNT(*) AS value FROM books b ${where}`, args, limit, offset,
     );
   }
 
   /** Visual media by category, for /movies, /series, /anime, /manga, /webtoons, /comics. */
-  listMedia(kind: VisualKind, limit = 50, offset = 0): Promise<PageResult<MediaRow>> {
+  listMedia(kind: VisualKind, limit = 50, offset = 0, opts: { sort?: string; status?: string } = {}): Promise<PageResult<MediaRow>> {
+    let where = "WHERE kind = ?";
+    const args: SqlValue[] = [kind];
+    if (opts.status === "todo") {
+      where += ` AND (list_status IS NULL OR lower(list_status) NOT IN (${DONE_STATUSES.map(() => "?").join(", ")}))`;
+      args.push(...DONE_STATUSES);
+    } else if (opts.status) {
+      where += " AND list_status = ?";
+      args.push(opts.status);
+    }
     return this.page<MediaRow>(
       `SELECT id, kind, title, cover_url, cover_key, year, rating,
               media_format, list_status, progress_current, progress_total, personal_score
-       FROM media_items WHERE kind = ? ORDER BY title COLLATE NOCASE`,
-      "SELECT COUNT(*) AS value FROM media_items WHERE kind = ?", [kind], limit, offset,
+       FROM media_items ${where} ORDER BY ${pickSort(MEDIA_SORTS, opts.sort)}`,
+      `SELECT COUNT(*) AS value FROM media_items ${where}`, args, limit, offset,
     );
+  }
+
+  /** Distinct list_status values present for a media kind, for the filter dropdown. */
+  async mediaStatuses(kind: VisualKind): Promise<string[]> {
+    const rows = await this.all<{ value: string }>(
+      "SELECT DISTINCT list_status AS value FROM media_items WHERE kind = ? AND list_status IS NOT NULL AND list_status != '' ORDER BY 1",
+      [kind],
+    );
+    return rows.map((row) => row.value);
   }
 
   mediaDetail(id: number): Promise<MediaDetail | null> {
@@ -1573,28 +1636,39 @@ export class LibraryDb {
   /** Drain a few queued enrichment jobs. Call from explicit admin/maintenance routes. */
   async drainEnrichment(limit = 5): Promise<number> {
     let done = 0;
+    // Skip items already tried this drain so a failing head item can't be
+    // re-selected and burn through MAX_ATTEMPTS within a single run.
+    const tried: number[] = [];
+    let consecutiveFailures = 0;
     for (let i = 0; i < limit; i++) {
       const item = await this.first<{ id: number; item_kind: ItemKind; item_id: number; attempts: number }>(
         `SELECT id, item_kind, item_id, attempts
          FROM enrich_queue
+         WHERE id NOT IN (${tried.map(() => "?").join(",") || "-1"})
          ORDER BY CASE
            WHEN item_kind IN ('movie', 'series', 'anime', 'manga', 'webtoon', 'comic') THEN 0
            WHEN item_kind = 'book' THEN 1
            WHEN item_kind = 'album' THEN 2
            WHEN item_kind = 'artist' THEN 3
            ELSE 4
-         END, id
+         END, attempts, id
          LIMIT 1`,
+        tried,
       );
       if (!item) break;
+      tried.push(item.id);
       try {
         await this.enrichOne(item.item_kind, item.item_id);
         await this.run("DELETE FROM enrich_queue WHERE id = ?", [item.id]);
         done++;
+        consecutiveFailures = 0;
       } catch (e) {
         console.error("enrich failed", item.item_kind, item.item_id, e);
         if (item.attempts + 1 >= MAX_ATTEMPTS) await this.run("DELETE FROM enrich_queue WHERE id = ?", [item.id]);
         else await this.run("UPDATE enrich_queue SET attempts = attempts + 1 WHERE id = ?", [item.id]);
+        // A run of failures usually means an upstream provider outage; stop
+        // instead of spending attempts across the whole queue.
+        if (++consecutiveFailures >= 3) break;
       }
     }
     return done;
